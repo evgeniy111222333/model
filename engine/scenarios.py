@@ -1,0 +1,181 @@
+import numpy as np
+
+class ScenarioEngine:
+    """
+    Manages deterministic scenarios (Optimistic, Baseline, Pessimistic)
+    and generates stochastic shocks using Latin Hypercube Sampling (LHS).
+    """
+    def __init__(self, regions, sectors):
+        self.regions = regions
+        self.sectors = sectors
+
+    def get_deterministic_modifiers(self, scenario_name, year):
+        """
+        Returns the base parameters for the given scenario and year.
+        Projected years: 2026 to 2050.
+        """
+        # Time-based interpolation factor (0.0 at 2026, 1.0 at 2050)
+        t = (year - 2026) / 24.0
+        
+        modifiers = {}
+        
+        if scenario_name == 'optimistic':
+            # Rapid recovery, EU integration
+            modifiers['repatriation_rate'] = 0.08 - 0.04 * t # Returns start high, taper off as refugees deplete
+            modifiers['mobilization_rate'] = max(0.005, 0.04 * (1.0 - t * 2.0)) if year < 2038 else 0.005
+            modifiers['labor_participation'] = 0.72 + 0.03 * t
+            modifiers['brain_drain_rate'] = max(0.001, 0.008 * (1.0 - t * 3.0))
+            modifiers['fertility_modifier'] = 1.0 + 0.25 * t # Post-war baby boom
+            
+            # TFP growth (high)
+            modifiers['tfp_growth'] = 0.035
+            
+            # Fiscal & reconstruction
+            modifiers['defense_spending_ratio'] = max(0.04, 0.25 - 0.21 * (year - 2026)/10.0) if year < 2036 else 0.04
+            modifiers['social_spending_ratio'] = 0.16 + 0.02 * t
+            modifiers['reconstruction_needs_usd'] = 20.0e9 * (1.0 - t) if year < 2046 else 1.0e9 # Reconstruction wraps up
+            modifiers['foreign_aid_usd'] = max(5.0e9, 35.0e9 * (1.0 - t * 1.5))
+            modifiers['foreign_aid_grant_share'] = 0.75
+            modifiers['fdi_usd'] = 3.0e9 + 12.0e9 * t # FDI surges as security is guaranteed
+            modifiers['deficit_monetization_rate'] = max(0.0, 0.05 * (1.0 - t * 2.0))
+            
+            # Energy grid recovery
+            modifiers['energy_recovery'] = 0.08 # 8% recovery of damaged grid capacity per year
+            
+        elif scenario_name == 'pessimistic':
+            # Frozen conflict, prolonged war of attrition
+            modifiers['repatriation_rate'] = 0.01
+            modifiers['mobilization_rate'] = 0.05 # Stays high
+            modifiers['labor_participation'] = 0.65
+            modifiers['brain_drain_rate'] = 0.01 # Steady loss of young talent
+            modifiers['fertility_modifier'] = 0.85
+            
+            # TFP growth (stagnant)
+            modifiers['tfp_growth'] = 0.005
+            
+            # Fiscal & reconstruction
+            modifiers['defense_spending_ratio'] = 0.28 # Remains extremely high
+            modifiers['social_spending_ratio'] = 0.12
+            modifiers['reconstruction_needs_usd'] = 10.0e9 # Constantly repairing damage
+            modifiers['foreign_aid_usd'] = 12.0e9 # Just enough to survive
+            modifiers['foreign_aid_grant_share'] = 0.30 # Mostly loans, leading to debt trap
+            modifiers['fdi_usd'] = 0.5e9
+            modifiers['deficit_monetization_rate'] = 0.20 # Monetizing deficits to fund defense
+            
+            # Energy grid recovery
+            modifiers['energy_recovery'] = 0.01
+            
+        else: # baseline
+            # Gradual recovery, slow reforms
+            modifiers['repatriation_rate'] = 0.04 - 0.02 * t
+            modifiers['mobilization_rate'] = max(0.015, 0.04 * (1.0 - t * 1.5)) if year < 2040 else 0.015
+            modifiers['labor_participation'] = 0.69 + 0.02 * t
+            modifiers['brain_drain_rate'] = max(0.003, 0.006 * (1.0 - t * 2.0))
+            modifiers['fertility_modifier'] = 1.0 + 0.10 * t
+            
+            # TFP growth (moderate)
+            modifiers['tfp_growth'] = 0.018
+            
+            # Fiscal & reconstruction
+            modifiers['defense_spending_ratio'] = max(0.08, 0.25 - 0.17 * (year - 2026)/12.0) if year < 2038 else 0.08
+            modifiers['social_spending_ratio'] = 0.14 + 0.02 * t
+            modifiers['reconstruction_needs_usd'] = 15.0e9 * (1.0 - t * 0.8)
+            modifiers['foreign_aid_usd'] = max(3.0e9, 22.0e9 * (1.0 - t * 1.2))
+            modifiers['foreign_aid_grant_share'] = 0.50
+            modifiers['fdi_usd'] = 1.5e9 + 4.5e9 * t
+            modifiers['deficit_monetization_rate'] = max(0.01, 0.08 * (1.0 - t * 1.8))
+            
+            # Energy grid recovery
+            modifiers['energy_recovery'] = 0.04
+            
+        return modifiers
+
+    def generate_lhs_samples(self, num_trials):
+        """
+        Generates Latin Hypercube Samples for Monte Carlo runs.
+        We have 4 key uncertain variables:
+        1. TFP shock factor (Normal distribution around scenario mean)
+        2. War damage intensity (Log-normal distribution)
+        3. Global export demand (Normal distribution)
+        4. Foreign aid realization (Uniform distribution)
+        
+        Returns:
+            - Dict of trial_idx -> array of sampled values
+        """
+        num_vars = 4
+        # Create empty LHS design matrix
+        design = np.zeros((num_trials, num_vars))
+        
+        for v in range(num_vars):
+            # Divide space [0, 1] into num_trials intervals
+            intervals = np.linspace(0.0, 1.0, num_trials + 1)
+            # Sample uniformly within each interval
+            lows = intervals[:-1]
+            highs = intervals[1:]
+            points = lows + np.random.rand(num_trials) * (highs - lows)
+            # Shuffle the points to randomize indices across variables
+            np.random.shuffle(points)
+            design[:, v] = points
+            
+        # Map design matrix columns to actual distributions
+        samples = {}
+        for trial in range(num_trials):
+            # 1. TFP shock (maps to multiplier centered at 1.0, std dev 0.02)
+            # Quantile function of normal distribution
+            tfp_p = design[trial, 0]
+            tfp_shock = float(np.percentile(np.random.normal(1.0, 0.02, 10000), tfp_p * 100))
+            
+            # 2. War damage (maps to % capital stock destroyed, lognormal to represent rare but severe spikes)
+            wd_p = design[trial, 1]
+            # Map [0, 1] to a lognormal distribution with mean ~0.01, max up to ~0.08
+            wd_shock = float(np.percentile(np.random.lognormal(-5.0, 0.8, 10000), wd_p * 100))
+            
+            # 3. Export demand (centered at 1.0, std dev 0.08)
+            exp_p = design[trial, 2]
+            export_shock = float(np.percentile(np.random.normal(1.0, 0.08, 10000), exp_p * 100))
+            
+            # 4. Foreign aid realization (0.8x to 1.2x of projected aid)
+            aid_p = design[trial, 3]
+            aid_multiplier = 0.8 + 0.4 * aid_p
+            
+            samples[trial] = {
+                'tfp_shock': tfp_shock,
+                'war_damage_intensity': wd_shock,
+                'export_demand_shock': export_shock,
+                'aid_multiplier': aid_multiplier
+            }
+            
+        return samples
+
+    def apply_stochastic_shocks(self, base_modifiers, lhs_sample):
+        """
+        Combines deterministic modifiers with Monte Carlo LHS samples.
+        """
+        mods = base_modifiers.copy()
+        
+        # Apply TFP modifier
+        mods['tfp_growth'] += (lhs_sample['tfp_shock'] - 1.0) * 0.1
+        
+        # Apply foreign aid multiplier
+        mods['foreign_aid_usd'] *= lhs_sample['aid_multiplier']
+        
+        # Add war damage details to regions/sectors
+        # We assume frontline/eastern oblasts bear the brunt of capital destruction shocks.
+        war_damage = {}
+        intensity = lhs_sample['war_damage_intensity']
+        
+        # Eastern/Southern regions: Donetsk, Luhansk, Kharkiv, Zaporizhzhia, Kherson, Mykolaiv, Odesa
+        high_risk_regions = ['Donetsk', 'Luhansk', 'Kharkiv', 'Zaporizhzhia', 'Kherson', 'Mykolaiv', 'Odesa']
+        
+        for r in self.regions:
+            war_damage[r] = {}
+            multiplier = 3.0 if r in high_risk_regions else 0.2
+            for s in self.sectors:
+                # Energy and Metallurgy are highly targeted
+                sector_mult = 2.0 if s in ['Energy', 'Metallurgy', 'Transport'] else 0.5
+                war_damage[r][s] = intensity * multiplier * sector_mult
+                
+        mods['war_damage'] = war_damage
+        mods['export_shock'] = lhs_sample['export_demand_shock']
+        
+        return mods
