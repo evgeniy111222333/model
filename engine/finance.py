@@ -5,7 +5,8 @@ class FinanceEngine:
     Macroeconomic, banking, and financial system engine.
     Manages commercial banking balance sheets, credit creation, government deficit financing,
     OVDP bond yield curves, and NBU monetary policy rules.
-    Supports a three-tier banking system (State, Commercial corporate, and Retail).
+    Supports a three-tier banking system (State, Commercial corporate, and Retail),
+    an Insurance sector (premiums, claims, and distress feedback), and a two-pillar pension system.
     """
     def __init__(self, initial_debt_gdp=0.85, initial_exchange_rate=40.0, initial_money_supply=2.0e12):
         """
@@ -26,11 +27,21 @@ class FinanceEngine:
         self.tax_cit = 0.18 # Corporate Income Tax
         self.tax_vat = 0.20 # VAT
         self.tax_military = 0.05 # Military levy (5%)
-        self.tax_pension = 0.22 # Unified Social Contribution (pension tax)
+        self.tax_pension = 0.18 # Solidarity Pension Contribution (Pillar 1)
+        self.tax_pension_pillar2 = 0.04 # Accumulative Pension Contribution (Pillar 2)
         
         # NBU FX Reserves
         self.nbu_fx_reserves_usd = 38.0e9
         self.pension_rate = 50000.0
+        
+        # Pillar 2 Accumulative Pension Fund
+        self.deposits_pension_pillar2 = 0.02e12 # UAH initial
+        
+        # Insurance Sector Balance Sheet
+        self.insurance_equity = 0.05e12
+        self.insurance_reserves = 0.20e12
+        self.insurance_bonds = 0.21e12
+        self.insurance_cash = 0.04e12
         
         # Three-Tier Commercial Banking Balance Sheets
         self.reserve_ratio = 0.10 # NBU reserve requirement (10%)
@@ -102,18 +113,46 @@ class FinanceEngine:
         cit_rev = corporate_profits * self.tax_cit
         vat_rev = nominal_gdp_uah * 0.5 * self.tax_vat
         customs_rev = imports_usd * self.exchange_rate * 0.05
-        pension_rev = total_wages * self.tax_pension
         
-        total_tax_revenue = pit_rev + cit_rev + vat_rev + customs_rev + pension_rev
+        # Pillar 1 Solidarity Pension Tax
+        pension_solidarity_rev = total_wages * self.tax_pension
+        # Pillar 2 Accumulative Pension Fund Contribution (directed to accumulative deposits)
+        pension_accum_rev = total_wages * self.tax_pension_pillar2
+        self.deposits_pension_pillar2 += pension_accum_rev
         
-        # 2. Expenditures (UAH)
+        total_tax_revenue = pit_rev + cit_rev + vat_rev + customs_rev + pension_solidarity_rev
+        
+        # 2. Insurance Premium Collection & Claims Payouts
+        # Households pay 1.5% premium on wealth, Firms pay 0.5% premium on capital stock value
+        ins_prem_hh = (household_wealth_sum if household_wealth_sum is not None else 1.0e12) * 0.015
+        ins_prem_firms = (nominal_gdp_uah * 2.7) * 0.005
+        total_ins_premiums = ins_prem_hh + ins_prem_firms
+        
+        self.insurance_reserves += total_ins_premiums
+        self.insurance_cash += total_ins_premiums
+        
+        # Claims payout: cover 40% of capital destruction due to war
+        capital_destruction_uah = nominal_gdp_uah * war_intensity * 0.40
+        claims_payout = capital_destruction_uah * 0.40
+        
+        self.insurance_reserves = max(0.01e12, self.insurance_reserves - claims_payout)
+        self.insurance_cash = max(0.005e12, self.insurance_cash - claims_payout)
+        
+        insurance_distress = False
+        if claims_payout > self.insurance_reserves:
+            excess_claims = claims_payout - self.insurance_reserves
+            self.insurance_equity = max(1e9, self.insurance_equity - excess_claims)
+            if self.insurance_equity < 0.01e12:
+                insurance_distress = True
+                
+        # 3. Expenditures (UAH)
         defense_exp = nominal_gdp_uah * defense_spend_ratio
         social_exp = nominal_gdp_uah * social_spend_ratio
         recon_exp = reconstruction_needs * self.exchange_rate
         
-        # Dynamic pension benefits
+        # Dynamic pension benefits (Pillar 1 Solidarity Fund)
         if num_pensioners is not None:
-            dynamic_pension = pension_rev / max(1e5, num_pensioners)
+            dynamic_pension = pension_solidarity_rev / max(1e5, num_pensioners)
             self.pension_rate = np.clip(dynamic_pension, 30000.0, 90000.0)
             pension_exp = self.pension_rate * num_pensioners
         else:
@@ -131,7 +170,7 @@ class FinanceEngine:
         
         total_expenditure = defense_exp + social_exp + recon_exp + debt_service + pension_exp
         
-        # 3. Budget Deficit & Financing
+        # 4. Budget Deficit & Financing
         budget_deficit = total_expenditure - total_tax_revenue
         
         # Aid in UAH
@@ -147,14 +186,14 @@ class FinanceEngine:
         monetized_amount = max(0.0, domestic_financing_need) * monetization_rate
         domestic_borrowing = max(0.0, domestic_financing_need) - monetized_amount
         
-        # 4. Debt Accumulation
+        # 5. Debt Accumulation
         self.external_debt_usd += aid_loans_usd
         self.domestic_debt_uah += domestic_borrowing
         
         total_debt_uah = (self.external_debt_usd * self.exchange_rate) + self.domestic_debt_uah
         self.debt_gdp = total_debt_uah / nominal_gdp_uah
         
-        # 5. Banking Sector Updates & Non-Performing Loans (NPLs)
+        # 6. Banking Sector Updates & Non-Performing Loans (NPLs)
         # NPL rates based on war intensity and high interest rates
         npl_rate_comm = np.clip(0.03 + 0.50 * war_intensity + 0.40 * max(0.0, self.interest_rate - 0.10), 0.02, 0.60)
         npl_rate_retail = np.clip(0.02 + 0.30 * war_intensity + 0.20 * max(0.0, self.interest_rate - 0.10), 0.02, 0.40)
@@ -198,11 +237,16 @@ class FinanceEngine:
         self.ovdp_bonds = self.ovdp_bonds_state + self.ovdp_bonds_comm + self.ovdp_bonds_retail
         self.equity = self.equity_state + self.equity_comm + self.equity_retail
         
-        # 6. BOP and NBU FX Interventions
+        # 7. BOP and NBU FX Interventions
         trade_balance_usd = exports_usd - imports_usd
         capital_account_flows = foreign_aid_usd + fdi_usd
+        
+        # Systemic distress feedback: Insurance distress or capital flight triggers extra outflow
         if capital_flight_triggered:
             capital_account_flows -= 2.0e9 # $2B capital flight outflow
+        if insurance_distress:
+            capital_account_flows -= 1.0e9 # Extra $1B outflow due to insurance collapse
+            
         bop_usd = trade_balance_usd + capital_account_flows
         
         # NBU defends UAH if BOP < 0, else buys reserves
@@ -257,6 +301,9 @@ class FinanceEngine:
         ir_shock = scenario_modifiers.get('interest_rate_shock', 0.0)
         self.interest_rate = max(0.02, neutral_rate + 1.6 * (self.inflation_rate - self.inflation_target) + ir_shock)
         
+        # Pillar 2 accumulative interest accumulation
+        self.deposits_pension_pillar2 *= (1.0 + self.interest_rate * 0.8)
+        
         return {
             'tax_revenue_uah': total_tax_revenue,
             'expenditure_uah': total_expenditure,
@@ -275,5 +322,8 @@ class FinanceEngine:
             'pension_rate': self.pension_rate,
             'nbu_fx_reserves_usd': self.nbu_fx_reserves_usd,
             'npl_comm': npl_rate_comm,
-            'npl_retail': npl_rate_retail
+            'npl_retail': npl_rate_retail,
+            'deposits_pension_pillar2': self.deposits_pension_pillar2,
+            'insurance_equity': self.insurance_equity,
+            'insurance_reserves': self.insurance_reserves
         }

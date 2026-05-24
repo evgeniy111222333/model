@@ -25,9 +25,14 @@ class FirmAgent:
         self.markup = markup_rate
 
     def plan_investment(self, profit, interest_rate, mpk, depreciation, war_dmg):
+        # Investment depends on profit, capital returns (MPK) vs bank interest rate
         reinvest_share = 0.15
         if mpk > interest_rate:
             reinvest_share += 0.10
+        else:
+            reinvest_share -= 0.05
+        
+        reinvest_share = np.clip(reinvest_share - 0.5 * interest_rate, 0.05, 0.30)
         inv = max(0.0, profit * reinvest_share)
         self.capital = max(1e-3, self.capital * (1.0 - depreciation - war_dmg) + inv)
         return inv
@@ -37,6 +42,7 @@ class ABMEngine:
     """
     High-performance Vectorized Columnar Agent-Based Model engine.
     Manages 3.4 million agents using flat numpy arrays for high speed and low memory usage.
+    Tracks Pillar 2 accumulative pension accounts and decentralized firm capital.
     """
     def __init__(self, regions, sectors, num_households=3400000, distances=None):
         self.regions = regions
@@ -59,6 +65,7 @@ class ABMEngine:
         self.agent_gender = None
         self.agent_health = None
         self.agent_age = None
+        self.agent_pension_wealth = None
         
         self.firms = {}
         
@@ -88,27 +95,20 @@ class ABMEngine:
             # ----------------------------------------------------
             # TEST COMPATIBILITY MODE (for unit tests / short runs)
             # ----------------------------------------------------
-            # All agents are working age, active, and split between skilled (40%) and unskilled (60%)
-            total_pop_sum = sum(initial_pop[r]['Male'].sum() + initial_pop[r]['Female'].sum() for r in self.regions)
-            
             regions_sampled = []
             for r_idx, r in enumerate(self.regions):
                 r_pop = initial_pop[r]['Male'].sum() + initial_pop[r]['Female'].sum()
-                r_share = r_pop / total_pop_sum
+                r_share = r_pop / 3.4e7
                 r_agents_count = int(self.num_households * r_share)
                 regions_sampled.extend([r_idx] * r_agents_count)
                 
-            # Fill remaining slots to reach self.num_households
             while len(regions_sampled) < self.num_households:
                 regions_sampled.append(np.random.randint(0, self.R))
                 
             self.agent_region = np.array(regions_sampled, dtype=np.int8)
-            # 40% skilled (2), 60% unskilled (0)
             self.agent_labor = np.random.choice([0, 2], size=self.num_households, p=[0.60, 0.40]).astype(np.int8)
-            # All are working-age (cohort 6: 30-34 years, age 32)
             self.agent_cohort = np.ones(self.num_households, dtype=np.int8) * 6
             self.agent_age = np.ones(self.num_households, dtype=np.int8) * 32
-            # All are active (health=0)
             self.agent_health = np.zeros(self.num_households, dtype=np.int8)
             self.agent_gender = np.random.choice([0, 1], size=self.num_households, p=[0.47, 0.53]).astype(np.int8)
         else:
@@ -148,8 +148,9 @@ class ABMEngine:
             self.agent_health = np.random.choice([0, 1], size=self.num_households, p=[0.96, 0.04]).astype(np.int8)
             self.agent_labor = np.random.choice([0, 1, 2], size=self.num_households, p=[0.50, 0.35, 0.15]).astype(np.int8)
             
-        # savings
         self.agent_wealth = (50000.0 + np.random.exponential(30000.0, size=self.num_households)).astype(np.float32)
+        # Pillar 2 pension accounts initialization
+        self.agent_pension_wealth = (5000.0 + np.random.exponential(10000.0, size=self.num_households)).astype(np.float32)
         
         # Initialize firm agents
         self.firms = {}
@@ -164,14 +165,11 @@ class ABMEngine:
 
     @property
     def households(self):
-        """
-        Backwards compatibility property: returns a lazy representation of the first 5000 agents
-        """
         compat_list = []
         limit = min(5000, self.num_households)
         for i in range(limit):
             h_val = int(self.agent_health[i])
-            if h_val > 1: # Exclude deceased (2) and emigrated (3)
+            if h_val > 1: # Exclude deceased and emigrated
                 continue
             l_idx = int(self.agent_labor[i])
             l_type = ['unskilled', 'semi-skilled', 'skilled'][l_idx]
@@ -193,7 +191,7 @@ class ABMEngine:
         """
         Executes one year ABM step:
           1. Vectorized Logit Migration Decisions.
-          2. Vectorized Stone-Geary LES Consumption and Wealth update.
+          2. Vectorized Stone-Geary LES Consumption, Pillar 2 Pension deductions, and Wealth updates.
         """
         # 1. Group-Level Vectorized Logit Migration
         p_indices = np.zeros(self.R)
@@ -210,28 +208,23 @@ class ABMEngine:
         beta_dist = 1.2
         beta_risk = 3.0
         
-        # We only migrate active, working-age agents
         active_mask = (self.agent_health == 0) & (self.agent_cohort >= 3) & (self.agent_cohort <= 12)
         
         for r_from_idx in range(self.R):
             r_from = self.regions[r_from_idx]
             for l_idx in range(3):
                 l_type = ['unskilled', 'semi-skilled', 'skilled'][l_idx]
-                
-                # Mask for this group
                 group_mask = active_mask & (self.agent_region == r_from_idx) & (self.agent_labor == l_idx)
                 N_g = np.sum(group_mask)
                 if N_g == 0:
                     continue
                 
-                # Compute utility for all 27 destinations
                 wages_dest = []
                 for r in self.regions:
                     w_r = wages_by_type[r]
                     if l_type in w_r:
                         w_val = w_r[l_type]
                     elif l_type == 'semi-skilled':
-                        # Fallback for old tests / loader structures
                         w_val = (w_r.get('skilled', 300000.0) + w_r.get('unskilled', 120000.0)) / 2.0
                     else:
                         w_val = w_r.get('unskilled', 120000.0)
@@ -241,7 +234,6 @@ class ABMEngine:
                 real_wages = wages_dest / np.clip(p_indices, 1e-2, None)
                 
                 dists = self.distances[r_from_idx] / 100.0
-                
                 utilities = beta_wage * np.log(np.clip(real_wages, 1e-1, None)) - beta_dist * dists - beta_risk * risks
                 utilities[r_from_idx] += 1.5
                 
@@ -253,6 +245,20 @@ class ABMEngine:
 
         # 2. Vectorized Stone-Geary LES Consumption & Wealth Update
         real_people_per_agent = 10.0
+        interest_rate = scenario_modifiers.get('interest_rate', 0.15)
+        deposit_interest_rate = interest_rate * 0.8
+        
+        # Distribute deceased agents' pension wealth to living active agents in the region
+        deceased_mask = self.agent_health == 2
+        for r_idx in range(self.R):
+            r_deceased_mask = deceased_mask & (self.agent_region == r_idx)
+            total_deceased_pension = np.sum(self.agent_pension_wealth[r_deceased_mask])
+            if total_deceased_pension > 0:
+                r_active_mask = (self.agent_health == 0) & (self.agent_region == r_idx)
+                num_active = np.sum(r_active_mask)
+                if num_active > 0:
+                    self.agent_wealth[r_active_mask] += float(total_deceased_pension / num_active)
+                self.agent_pension_wealth[r_deceased_mask] = 0.0
         
         aggregate_consumption = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
         
@@ -263,12 +269,12 @@ class ABMEngine:
                 continue
                 
             wealth_sub = self.agent_wealth[r_mask]
+            pension_wealth_sub = self.agent_pension_wealth[r_mask]
             labor_sub = self.agent_labor[r_mask]
             cohort_sub = self.agent_cohort[r_mask]
             health_sub = self.agent_health[r_mask]
             
             tax = tax_rates.get(r, 0.23)
-            # Wages by labor type with fallback for semi-skilled
             w_unskilled = wages_by_type[r].get('unskilled', 120000.0)
             w_skilled = wages_by_type[r].get('skilled', 300000.0)
             w_semiskilled = wages_by_type[r].get('semi-skilled', (w_skilled + w_unskilled) / 2.0)
@@ -276,12 +282,31 @@ class ABMEngine:
             wages_r = np.array([w_unskilled, w_semiskilled, w_skilled])
             agent_wages = wages_r[labor_sub]
             
+            # Pillar 2 individual accumulative pension contribution (4%)
             is_worker = (cohort_sub >= 3) & (cohort_sub <= 12) & (health_sub == 0)
-            income = np.where(is_worker, agent_wages * (1.0 - tax), 0.0)
+            pension_pillar2_contrib = np.where(is_worker, agent_wages * 0.04, 0.0)
+            pension_wealth_sub += pension_pillar2_contrib
             
-            pension_rate = 50000.0
+            # Accumulated interest on Pillar 2 pension accounts
+            pension_wealth_sub *= (1.0 + deposit_interest_rate)
+            
+            # Net income after taxes (Solidarity USC + income tax + military levy)
+            income = np.where(is_worker, agent_wages * (1.0 - tax - 0.04), 0.0)
+            
+            # State Pension (Pillar 1)
+            pension_rate = scenario_modifiers.get('pension_rate', 50000.0)
             is_pensioner = (cohort_sub > 12) | (health_sub == 1)
             income += np.where(is_pensioner, pension_rate * (1.0 - tax), 0.0)
+            
+            # Private Pension Annuity Payout (Pillar 2)
+            # Pensioners receive 8% of their accumulated Pillar 2 pension wealth as private pension supplement
+            is_retired_pensioner = (cohort_sub > 12) & (health_sub == 0)
+            private_annuity = np.where(is_retired_pensioner, pension_wealth_sub * 0.08, 0.0)
+            pension_wealth_sub -= private_annuity
+            income += private_annuity
+            
+            # Save pension wealth back
+            self.agent_pension_wealth[r_mask] = pension_wealth_sub.astype(np.float32)
             
             wealth_draw = wealth_sub * 0.15
             liquidity = income + wealth_draw
@@ -338,3 +363,52 @@ class ABMEngine:
                 labor_supply[r][l_type] = max(100.0, supply_val)
                 
         return labor_supply, aggregate_consumption
+
+    def update_firm_capitals(self, total_profits, realized_output, prices, scenario_modifiers):
+        """
+        Decentralized Firm Agent capital update and investment planning.
+        Firms invest corporate profits based on MPK vs interest rates, and expand capital.
+        """
+        interest_rate = scenario_modifiers.get('interest_rate', 0.15)
+        war_damage = scenario_modifiers.get('war_damage', {})
+        depreciation = 0.07
+        
+        fdi_uah = scenario_modifiers.get('fdi_usd', 1.5e9) * scenario_modifiers.get('exchange_rate', 40.0)
+        aid_uah = scenario_modifiers.get('foreign_aid_usd', 22.0e9) * (1.0 - scenario_modifiers.get('foreign_aid_grant_share', 0.50)) * scenario_modifiers.get('exchange_rate', 40.0)
+        
+        # Calculate national output sums per sector for share distribution
+        total_sector_output = {s: sum(realized_output.get((rj, s), 0.0) for rj in self.regions) for s in self.sectors}
+        
+        capital_next = {}
+        for r in self.regions:
+            capital_next[r] = {}
+            state = scenario_modifiers.get('frontline_states', {}).get(r, 0)
+            if state == 2: # Occupied
+                for s in self.sectors:
+                    self.firms[r][s].capital = 1e-3
+                    capital_next[r][s] = 1e-3
+                continue
+                
+            for s in self.sectors:
+                firm = self.firms[r][s]
+                out_qty = realized_output.get((r, s), 0.0)
+                out_val = out_qty * prices[r][s]
+                
+                out_share = out_qty / max(1e-5, total_sector_output[s])
+                firm_profit = total_profits * out_share * 0.10 # estimate individual profit
+                
+                # Dynamic investment planning
+                mpk = out_val / max(1e-5, firm.capital)
+                inv = firm.plan_investment(firm_profit, interest_rate, mpk, depreciation, war_damage.get(r, {}).get(s, 0.0))
+                
+                # Receive share of FDI and Aid
+                fdi_share = out_share * (fdi_uah / len(self.regions))
+                aid_share = out_share * (aid_uah / len(self.regions))
+                firm.capital += fdi_share + aid_share
+                
+                # Combat / frontline direct capital damage
+                if state == 1:
+                    firm.capital = max(1e-3, firm.capital * (1.0 - 0.15))
+                    
+                capital_next[r][s] = firm.capital
+        return capital_next

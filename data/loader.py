@@ -485,7 +485,16 @@ def generate_baseline_data():
         
         for s in SECTORS:
             share = budget_shares[s]
-            subsistence_demands[r][s] = (0.40 * reg_cons_uah * share) / max(1e-1, reg_pop)
+            parent = SUB_SECTORS[s]
+            if parent in ['Agriculture', 'Healthcare'] or s in [
+                'FoodProcessing', 'UtilityServices', 'GasHeatSupply', 'EnergyThermal',
+                'EnergyNuclearGen', 'EnergyTransmission', 'Telecom', 'PharmaGenerics',
+                'PharmaOriginals', 'TransRoad', 'TransRailPassenger', 'ConstResidential', 'TradeRetail'
+            ]:
+                sub_coeff = 0.75
+            else:
+                sub_coeff = 0.05
+            subsistence_demands[r][s] = (sub_coeff * reg_cons_uah * share) / max(1e-1, reg_pop)
             
     wages_by_type = {}
     for r in REGIONS:

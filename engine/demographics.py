@@ -69,6 +69,10 @@ class DemographicEngine:
             0.0042, 0.0060, 0.0090, 0.0130, 0.0190, 0.0270, 0.0380, 0.0550, 0.0800, 0.1100
         ]
 
+        self.share_unskilled = 0.50
+        self.share_semiskilled = 0.35
+        self.share_skilled = 0.15
+
         if distances is not None:
             self.distances = distances
         else:
@@ -168,6 +172,31 @@ class DemographicEngine:
                 
                 new_labor = np.random.choice([0, 1, 2], size=num_at_trans, p=[p_unskilled, p_semiskilled, p_skilled])
                 abm.agent_labor[at_transition] = new_labor
+                
+            # Adult retraining model for working-age active agents (cohort 3-12, age > 18)
+            working_adults = active_mask & (abm.agent_age > transition_age) & (abm.agent_cohort >= 3) & (abm.agent_cohort <= 12) & (abm.agent_health == 0)
+            
+            # Unskilled -> Semi-skilled
+            unskilled_adults = working_adults & (abm.agent_labor == 0)
+            num_unskilled = np.sum(unskilled_adults)
+            if num_unskilled > 0:
+                edu_mult = scenario_modifiers.get('education_spending_mult', 1.0)
+                p_retrain_u = np.clip(0.02 * edu_mult, 0.0, 0.10)
+                draws = np.random.rand(num_unskilled)
+                upgrade_mask = draws < p_retrain_u
+                indices = np.where(unskilled_adults)[0]
+                abm.agent_labor[indices[upgrade_mask]] = 1
+                
+            # Semi-skilled -> Skilled
+            semiskilled_adults = working_adults & (abm.agent_labor == 1)
+            num_semiskilled = np.sum(semiskilled_adults)
+            if num_semiskilled > 0:
+                edu_mult = scenario_modifiers.get('education_spending_mult', 1.0)
+                p_retrain_m = np.clip(0.01 * edu_mult, 0.0, 0.05)
+                draws = np.random.rand(num_semiskilled)
+                upgrade_mask = draws < p_retrain_m
+                indices = np.where(semiskilled_adults)[0]
+                abm.agent_labor[indices[upgrade_mask]] = 2
             
             # 2. Health Morbidity Transitions (Active -> Disabled)
             disable_probs = self.base_disability[abm.agent_cohort, abm.agent_gender].copy()
@@ -422,15 +451,28 @@ class DemographicEngine:
             self.pop_array = new_pop
             
             # Calculate labor supply for compatibility with tests
+            # Dynamic macro retraining update
+            edu_mult = scenario_modifiers.get('education_spending_mult', 1.0)
+            retrain_u_to_m = 0.02 * edu_mult
+            retrain_m_to_s = 0.01 * edu_mult
+            
+            # Apply retraining shifts to the macro shares
+            flow_u_to_m = self.share_unskilled * retrain_u_to_m
+            flow_m_to_s = self.share_semiskilled * retrain_m_to_s
+            
+            self.share_unskilled = max(0.10, self.share_unskilled - flow_u_to_m)
+            self.share_semiskilled = max(0.10, self.share_semiskilled + flow_u_to_m - flow_m_to_s)
+            self.share_skilled = max(0.05, self.share_skilled + flow_m_to_s)
+            
             labor_supply = {}
             for r_idx, r in enumerate(self.regions):
                 active_working = new_pop[r_idx, 3:13, :, 0] # cohort 3-12, Active
                 males = active_working[:, 0] * (1.0 - mobilization_rate)
                 females = active_working[:, 1]
                 labor_supply[r] = {
-                    'unskilled': max(100.0, np.sum(males + females) * 0.50 * labor_participation),
-                    'semi-skilled': max(100.0, np.sum(males + females) * 0.35 * labor_participation),
-                    'skilled': max(100.0, np.sum(males + females) * 0.15 * labor_participation)
+                    'unskilled': max(100.0, np.sum(males + females) * self.share_unskilled * labor_participation),
+                    'semi-skilled': max(100.0, np.sum(males + females) * self.share_semiskilled * labor_participation),
+                    'skilled': max(100.0, np.sum(males + females) * self.share_skilled * labor_participation)
                 }
 
         total_pop_sum = float(np.sum(self.pop_array))

@@ -320,52 +320,15 @@ class ModelRunner:
                 num_pensioners=num_pensioners
             )
             
-            # 9. Dynamic Capital Accumulation with Bank Lending
-            bank_loans_added = fin_results['bank_loans']
-            fdi_uah = mods.get('fdi_usd', 1.5e9) * fin_results['exchange_rate']
-            aid_loans_uah = mods.get('foreign_aid_usd', 22.0e9) * (1.0 - mods.get('foreign_aid_grant_share', 0.50)) * fin_results['exchange_rate']
-            
-            # Interest rates affect profit reinvestment share and bank loan investment share
-            reinvested_profits_share = np.clip(0.30 - 0.8 * fin_results['interest_rate'], 0.10, 0.25)
-            reinvested_profits = total_profits * reinvested_profits_share
-            bank_inv_share = np.clip(0.10 - 0.3 * fin_results['interest_rate'], 0.02, 0.08)
-            
-            total_investment = fdi_uah + aid_loans_uah + reinvested_profits + bank_loans_added * bank_inv_share
-            
-            investment_allocation = {}
-            for r in self.regions:
-                investment_allocation[r] = {}
-                state = self.frontline_states[r]
-                if state == 2:
-                    for s in self.sectors:
-                        investment_allocation[r][s] = 0.0
-                    continue
-                    
-                grp_share = regional_grp_real[r] / max(1e-5, real_gdp_uah)
-                for s in self.sectors:
-                    sector_share = realized_output[(r, s)] / max(1e-5, sum(realized_output[(r, sx)] for sx in self.sectors))
-                    investment_allocation[r][s] = total_investment * grp_share * sector_share
-
-            # Update capital stocks
-            self.capital = self.production.accumulate_capital(
-                capital=self.capital,
-                investment=investment_allocation,
-                war_damage=mods['war_damage']
+            # 9. Dynamic Capital Accumulation (Decentralized Firm-level updates)
+            mods['interest_rate'] = fin_results['interest_rate']
+            mods['exchange_rate'] = fin_results['exchange_rate']
+            self.capital = self.abm.update_firm_capitals(
+                total_profits=total_profits,
+                realized_output=realized_output,
+                prices=self.prices,
+                scenario_modifiers=mods
             )
-            
-            for r in self.regions:
-                state = self.frontline_states[r]
-                if state == 1:
-                    for s in self.sectors:
-                        self.capital[r][s] = max(1e-3, self.capital[r][s] * (1.0 - 0.15))
-                elif state == 2:
-                    for s in self.sectors:
-                        self.capital[r][s] = 1e-3
-            
-            # Sync capital back to Firm Agents
-            for r in self.regions:
-                for s in self.sectors:
-                    self.abm.firms[r][s].capital = self.capital[r][s]
             
             # TFP growth step: region-specific tfp growth based on scenarios and frontline status
             tfp_growth_by_region = mods.get('tfp_growth_by_region', {})
@@ -394,6 +357,9 @@ class ModelRunner:
                 'bank_deposits': fin_results['bank_deposits'],
                 'nbu_fx_reserves_usd': fin_results.get('nbu_fx_reserves_usd', 38.0e9),
                 'pension_rate': fin_results.get('pension_rate', 50000.0),
+                'deposits_pension_pillar2': fin_results.get('deposits_pension_pillar2', 0.0),
+                'insurance_equity': fin_results.get('insurance_equity', 0.0),
+                'insurance_reserves': fin_results.get('insurance_reserves', 0.0),
                 'regional_data': {r: {
                     'grp_real': regional_grp_real[r],
                     'grp_nominal': regional_grp_nominal[r],
