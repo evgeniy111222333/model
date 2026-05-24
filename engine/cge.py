@@ -4,10 +4,10 @@ import scipy.optimize as opt
 class CGESolver:
     """
     Computable General Equilibrium (CGE) market clearing solver.
-    Solves 486 non-linear equations (405 commodity prices + 27 * 3 labor wages)
-    using a fully vectorized NumPy matrix representation to bypass Python loops.
+    Solves commodity prices and labor wages equations using either Powell's hybrid method
+    (for legacy S <= 15 models) or vectorized tatonnement iterations (for high-dimensional S = 93 models).
     """
-    def __init__(self, regions, sectors, base_tech_coefficients):
+    def __init__(self, regions, sectors, base_tech_coefficients, distances=None):
         self.regions = regions
         self.sectors = sectors
         self.R = len(regions)
@@ -15,6 +15,7 @@ class CGESolver:
         self.N = self.R * self.S
         
         self.base_tech = base_tech_coefficients
+        self.distances = distances
         
         # Mapping index
         self.node_to_idx = {}
@@ -26,14 +27,14 @@ class CGESolver:
                 self.idx_to_node.append((r, s))
                 idx += 1
                 
-        # Build direct requirement coefficient matrix B (15 x 15)
-        # B[i, j] = how much of sector i is needed per unit of output of sector j
+        # Build direct requirement coefficient matrix B (S x S)
         self.B_mat = np.zeros((self.S, self.S))
         for s_idx, s in enumerate(self.sectors):
             reqs = self.base_tech.get(s, {})
             for s_in, coeff in reqs.items():
-                s_in_idx = self.sectors.index(s_in)
-                self.B_mat[s_in_idx, s_idx] = coeff
+                if s_in in self.sectors:
+                    s_in_idx = self.sectors.index(s_in)
+                    self.B_mat[s_in_idx, s_idx] = coeff
                 
         # Elasticities of Substitution
         self.sigma_VA = 0.85   # Value Added: Labor vs Capital-Energy
@@ -56,7 +57,69 @@ class CGESolver:
         
         self.calibrated = False
         self.trade_shares = None
-        self.distances = None
+        
+        # Determine energy sector indices and weights for aggregate energy price index
+        self.energy_indices = []
+        self.energy_weights = []
+        
+        if self.S <= 15:
+            if 'Energy' in self.sectors:
+                self.energy_indices.append(self.sectors.index('Energy'))
+                self.energy_weights.append(1.0)
+            else:
+                self.energy_indices.append(0)
+                self.energy_weights.append(1.0)
+        else:
+            # Energy sub-sectors for 93-sector model
+            energy_subsectors = [
+                'EnergyThermal', 'EnergyNuclearGen', 'EnergyNuclearFuel', 
+                'EnergyNuclearWaste', 'EnergySolar', 'EnergyWindHydro', 
+                'EnergyTransmission', 'CoalMining', 'OilGasExtraction', 'GasHeatSupply'
+            ]
+            weights = {
+                'CoalMining': 0.08, 'OilGasExtraction': 0.12,
+                'EnergyThermal': 0.20, 'EnergyNuclearGen': 0.25, 'EnergyNuclearFuel': 0.05,
+                'EnergyNuclearWaste': 0.03, 'EnergySolar': 0.07, 'EnergyWindHydro': 0.05,
+                'EnergyTransmission': 0.10, 'GasHeatSupply': 0.05
+            }
+            tot_w = sum(weights.get(s, 0.0) for s in energy_subsectors if s in self.sectors)
+            for s in energy_subsectors:
+                if s in self.sectors:
+                    idx = self.sectors.index(s)
+                    self.energy_indices.append(idx)
+                    self.energy_weights.append(weights.get(s, 1.0) / (tot_w if tot_w > 0 else 1.0))
+                    
+        self.energy_indices = np.array(self.energy_indices, dtype=np.int32)
+        self.energy_weights = np.array(self.energy_weights, dtype=np.float64)
+
+        # Base import and export shares for 93-sector model
+        self.base_export_shares = {
+            'AgriGrain': 0.35, 'AgriTechnical': 0.30, 'SteelIron': 0.35, 'MetalProducts': 0.25, 
+            'NonFerrousMetal': 0.20, 'ChemicalFertilizers': 0.15, 'ITServicesExport': 0.55, 
+            'ITProductSaaS': 0.20, 'HeavyMachinery': 0.12, 'TransportMachinery': 0.10,
+            'AgriMachinery': 0.08, 'ElectronicsComponents': 0.10, 'FoodProcessing': 0.15,
+            'TextilesApparel': 0.10, 'LeatherFootwear': 0.08, 'FurnitureHome': 0.08,
+            'PetrochemicalsPlastics': 0.10, 'IndustrialChemicals': 0.08, 'Tourism': 0.05,
+            'Beverages': 0.05, 'HotelsTourism': 0.05
+        }
+        self.base_import_shares = {
+            'CoalMining': 0.10, 'OilGasExtraction': 0.25, 'EnergyThermal': 0.05, 'EnergyNuclearFuel': 0.40,
+            'ChemicalFertilizers': 0.15, 'IndustrialChemicals': 0.15, 'PetrochemicalsPlastics': 0.20,
+            'BuildingMaterials': 0.05, 'PulpPaper': 0.15, 'PharmaAPI': 0.40, 'PharmaGenerics': 0.20,
+            'PharmaOriginals': 0.35, 'MedicalDevices': 0.30, 'HeavyMachinery': 0.25,
+            'TransportMachinery': 0.22, 'AgriMachinery': 0.20, 'ElectricalEquipment': 0.18,
+            'PrecisionInstruments': 0.25, 'ElectronicsComponents': 0.35, 'IndustrialRobots': 0.30,
+            'MilSmallArms': 0.20, 'MilArmoredVehicles': 0.35, 'MilArtillery': 0.30, 'MilMissiles': 0.35,
+            'MilUAVs': 0.25, 'MilEW': 0.25, 'MilNaval': 0.35, 'MilProtectiveGear': 0.15,
+            'FoodProcessing': 0.10, 'TextilesApparel': 0.22, 'LeatherFootwear': 0.18, 'FurnitureHome': 0.10,
+            'ITProductSaaS': 0.15, 'Telecom': 0.08, 'InternetCloud': 0.10, 'Cybersecurity': 0.12
+        }
+        
+        self.base_export_vec = np.array([self.base_export_shares.get(s, 0.01) for s in self.sectors])
+        self.base_import_vec = np.array([self.base_import_shares.get(s, 0.05) for s in self.sectors])
+
+        self.realized_imports = {}
+        self.realized_exports = {}
 
     def _init_distances(self):
         self.distances = np.zeros((self.R, self.R))
@@ -97,24 +160,10 @@ class CGESolver:
                 
         self.calibrated = True
 
-    def evaluate_cge_equations(self, multipliers, capital_mat, labor_supply_mat, tfp_mat, prices_base_mat, wages_base_mat, energy_util_mat, hh_demands_mat):
+    def evaluate_cge_algebra(self, prices, w_unskilled, w_semiskilled, w_skilled, capital_mat, labor_supply_mat, tfp_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0):
         """
-        Evaluates excess demands using fully vectorized matrix algebra.
+        Evaluates core non-linear CGE equations: value added nesting, factor demands, trade flow clearance.
         """
-        # Multipliers clipped for numerical bounds
-        mult_clip = np.clip(multipliers, 1e-3, 1e9)
-        prices_mult = mult_clip[0:self.N].reshape((self.R, self.S))
-        wages_skilled_mult = mult_clip[self.N:self.N+self.R]
-        wages_semiskilled_mult = mult_clip[self.N+self.R:self.N+2*self.R]
-        wages_unskilled_mult = mult_clip[self.N+2*self.R:self.N+3*self.R]
-        
-        # Prices (R, S) and Wages (R, 3)
-        prices = prices_base_mat * prices_mult
-        
-        w_unskilled = wages_base_mat[:, 0] * wages_unskilled_mult
-        w_semiskilled = wages_base_mat[:, 1] * wages_semiskilled_mult
-        w_skilled = wages_base_mat[:, 2] * wages_skilled_mult
-        
         # 1. Labor cost index: w_L (R,)
         sig_L = self.sigma_L
         w_L = (self.theta_u ** sig_L * w_unskilled**(1-sig_L) + 
@@ -124,8 +173,8 @@ class CGESolver:
         # Capital rent (R, S)
         rk = prices * 0.15
         
-        # Energy price in each region (R,)
-        pe = prices[:, 3] # Energy is index 3 in SECTORS
+        # Energy price index in each region (R,)
+        pe = np.sum(prices[:, self.energy_indices] * self.energy_weights[np.newaxis, :], axis=1)
         
         # 2. Capital-Energy index: p_KE (R, S)
         sig_KE = self.sigma_KE
@@ -159,55 +208,107 @@ class CGESolver:
         dem_skilled = np.sum(L_s, axis=1)
         
         # 6. Intermediate Demands (R, S)
-        # B_mat is (S, S), y_val is (R, S), so y_val @ B_mat.T represents required intermediate inputs
         intermediate_demands = y_val @ self.B_mat.T
         
-        # 7. Armington Trade Distribution
         d_total = hh_demands_mat + intermediate_demands
-        d_domestic = d_total * 0.85
         
+        # 7. Imports and Domestic Demand
+        if self.S <= 15:
+            # Legacy mode
+            d_domestic = d_total * 0.85
+            imports = d_total * 0.15
+            exports = y_val * 0.15
+        else:
+            # High-fidelity endogenous trade
+            # Composite price index in each region (R, S)
+            p_comp_mat = np.zeros((self.R, self.S))
+            for s_idx in range(self.S):
+                shares = self.trade_shares[:, :, s_idx]
+                p_src = prices[:, s_idx]
+                p_comp_mat[:, s_idx] = shares.T @ p_src
+                
+            p_import_uah = exchange_rate * 1.0
+            import_ratio = p_comp_mat / np.clip(p_import_uah, 1e-2, None)
+            imports = d_total * self.base_import_vec[np.newaxis, :] * (import_ratio ** self.eta_World)
+            imports = np.clip(imports, 0.0, d_total * 0.90)
+            d_domestic = d_total - imports
+            
+            # Exports
+            p_export_uah = exchange_rate * 1.0
+            export_ratio = p_export_uah / np.clip(prices, 1e-2, None)
+            exports = y_val * self.base_export_vec[np.newaxis, :] * (export_ratio ** 1.8)
+            exports = np.clip(exports, 0.0, y_val * 0.90)
+
+        # 8. Interregional Trade Distribution
         total_commodity_demand = np.zeros((self.R, self.S))
         
         for s_idx in range(self.S):
-            # shares is (R, R) -> from src (row) to dest (col)
             shares = self.trade_shares[:, :, s_idx]
             p_src = prices[:, s_idx]
+            p_comp = np.sum(shares.T @ p_src) # average proxy for trade shares correction
             
-            # composite price in each destination region (R,)
-            p_comp = shares.T @ p_src
-            
-            # Adjust trade shares based on relative prices
             shares_adj = shares * (p_comp / np.clip(p_src[:, np.newaxis], 1e-2, None)) ** self.eta_Arm
             
-            # Normalize trade shares per destination column
             sum_shares = np.sum(shares_adj, axis=0)
             sum_shares[sum_shares == 0] = 1.0
             shares_adj /= sum_shares
             
             total_commodity_demand[:, s_idx] = shares_adj @ d_domestic[:, s_idx]
-
-        # 8. Excess Demands
-        excess_commodity = (total_commodity_demand - y_val).flatten()
+            
+        # 9. Excess Demands
+        if self.S <= 15:
+            excess_commodity = (total_commodity_demand - y_val).flatten()
+        else:
+            # Production must equal domestic interregional demand + exports
+            excess_commodity = (total_commodity_demand + exports - y_val).flatten()
+            
         excess_labor_skilled = dem_skilled - labor_supply_mat[:, 2]
         excess_labor_semiskilled = dem_semiskilled - labor_supply_mat[:, 1]
         excess_labor_unskilled = dem_unskilled - labor_supply_mat[:, 0]
         
-        return np.concatenate([
+        excess = np.concatenate([
             excess_commodity, 
             excess_labor_skilled, 
             excess_labor_semiskilled, 
             excess_labor_unskilled
         ])
+        
+        return excess, y_val, imports, exports
 
-    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands):
+    def evaluate_cge_equations(self, multipliers, capital_mat, labor_supply_mat, tfp_mat, prices_base_mat, wages_base_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0):
+        mult_clip = np.clip(multipliers, 1e-3, 1e9)
+        prices_mult = mult_clip[0:self.N].reshape((self.R, self.S))
+        wages_skilled_mult = mult_clip[self.N:self.N+self.R]
+        wages_semiskilled_mult = mult_clip[self.N+self.R:self.N+2*self.R]
+        wages_unskilled_mult = mult_clip[self.N+2*self.R:self.N+3*self.R]
+        
+        prices = prices_base_mat * prices_mult
+        w_unskilled = wages_base_mat[:, 0] * wages_unskilled_mult
+        w_semiskilled = wages_base_mat[:, 1] * wages_semiskilled_mult
+        w_skilled = wages_base_mat[:, 2] * wages_skilled_mult
+        
+        excess, _, _, _ = self.evaluate_cge_algebra(
+            prices=prices,
+            w_unskilled=w_unskilled,
+            w_semiskilled=w_semiskilled,
+            w_skilled=w_skilled,
+            capital_mat=capital_mat,
+            labor_supply_mat=labor_supply_mat,
+            tfp_mat=tfp_mat,
+            energy_util_mat=energy_util_mat,
+            hh_demands_mat=hh_demands_mat,
+            exchange_rate=exchange_rate
+        )
+        return excess
+
+    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0):
         """
         Solves for the prices and wages that clear all CGE markets.
-        Uses Broyden's first method or Powell's hybrid method for rapid multi-dimensional root finding.
+        Uses Powell hybrid method for small systems and fast tatonnement iterations for large systems.
         """
         if not self.calibrated:
             self.calibrate_parameters(capital, labor_supply_by_type, tfp, household_demands)
             
-        # Convert all input dictionary variables to NumPy arrays (R, S) or (R, 3)
         capital_mat = np.zeros((self.R, self.S))
         tfp_mat = np.zeros((self.R, self.S))
         prices_init_mat = np.zeros((self.R, self.S))
@@ -230,79 +331,128 @@ class CGESolver:
             labor_supply_mat[r_idx, 1] = labor_supply_by_type[r].get('semi-skilled', labor_supply_by_type[r]['unskilled'] * 0.70)
             labor_supply_mat[r_idx, 2] = labor_supply_by_type[r]['skilled']
             
-            # Baseline wages
             wages_base_mat[r_idx, 0] = labor_supply_by_type[r].get('unskilled_wage', 120000.0)
             wages_base_mat[r_idx, 2] = labor_supply_by_type[r].get('skilled_wage', 300000.0)
             wages_base_mat[r_idx, 1] = (wages_base_mat[r_idx, 0] + wages_base_mat[r_idx, 2]) / 2.0
+
+        if self.S <= 15:
+            # ----------------------------------------------------
+            # POWELL HYBRID SOLVER (for legacy/unit tests)
+            # ----------------------------------------------------
+            guess = np.ones(self.N + 3 * self.R)
             
-        guess = np.ones(self.N + 3 * self.R)
-        
-        def obj_func(vars):
-            return self.evaluate_cge_equations(
-                multipliers=vars,
-                capital_mat=capital_mat,
-                labor_supply_mat=labor_supply_mat,
-                tfp_mat=tfp_mat,
-                prices_base_mat=prices_init_mat,
-                wages_base_mat=wages_base_mat,
-                energy_util_mat=energy_util_mat,
-                hh_demands_mat=hh_demands_mat
-            )
+            def obj_func(vars):
+                return self.evaluate_cge_equations(
+                    multipliers=vars,
+                    capital_mat=capital_mat,
+                    labor_supply_mat=labor_supply_mat,
+                    tfp_mat=tfp_mat,
+                    prices_base_mat=prices_init_mat,
+                    wages_base_mat=wages_base_mat,
+                    energy_util_mat=energy_util_mat,
+                    hh_demands_mat=hh_demands_mat,
+                    exchange_rate=exchange_rate
+                )
+                
+            res = opt.root(obj_func, guess, method='hybr', options={'xtol': 1e-4, 'maxfev': 150})
             
-        # Run Powell hybrid method
-        res = opt.root(obj_func, guess, method='hybr', options={'xtol': 1e-4, 'maxfev': 150})
+            solved_mult = np.clip(res.x, 1e-3, 1e9)
+            prices_mult = solved_mult[0:self.N].reshape((self.R, self.S))
+            wages_skilled_mult = solved_mult[self.N:self.N+self.R]
+            wages_semiskilled_mult = solved_mult[self.N+self.R:self.N+2*self.R]
+            wages_unskilled_mult = solved_mult[self.N+2*self.R:self.N+3*self.R]
+            
+            prices_solved_mat = prices_init_mat * prices_mult
+            wu_solved = wages_base_mat[:, 0] * wages_unskilled_mult
+            wm_solved = wages_base_mat[:, 1] * wages_semiskilled_mult
+            ws_solved = wages_base_mat[:, 2] * wages_skilled_mult
+        else:
+            # ----------------------------------------------------
+            # VECTORIZED TATONNEMENT SOLVER (for high-dimensional 93 sectors)
+            # ----------------------------------------------------
+            prices_solved_mat = prices_init_mat.copy()
+            wages_solved_mat = wages_base_mat.copy()
+            
+            gamma_p = 0.08
+            gamma_w = 0.08
+            
+            max_iter = 100
+            tol = 5e-3
+            
+            for it in range(max_iter):
+                excess, _, _, _ = self.evaluate_cge_algebra(
+                    prices=prices_solved_mat,
+                    w_unskilled=wages_solved_mat[:, 0],
+                    w_semiskilled=wages_solved_mat[:, 1],
+                    w_skilled=wages_solved_mat[:, 2],
+                    capital_mat=capital_mat,
+                    labor_supply_mat=labor_supply_mat,
+                    tfp_mat=tfp_mat,
+                    energy_util_mat=energy_util_mat,
+                    hh_demands_mat=hh_demands_mat,
+                    exchange_rate=exchange_rate
+                )
+                
+                excess_commodity = excess[0:self.N].reshape((self.R, self.S))
+                excess_skilled = excess[self.N:self.N+self.R]
+                excess_semiskilled = excess[self.N+self.R:self.N+2*self.R]
+                excess_unskilled = excess[self.N+2*self.R:self.N+3*self.R]
+                
+                max_err = np.max(np.abs(excess))
+                if max_err < tol:
+                    break
+                    
+                # Adjust prices based on relative excess demand
+                # Scale step size dynamically to preserve stability
+                prices_solved_mat *= (1.0 + gamma_p * np.clip(excess_commodity / np.clip(hh_demands_mat + 1.0, 1e-1, None), -0.2, 0.2))
+                prices_solved_mat = np.clip(prices_solved_mat, 1e-2, 1e2)
+                
+                # Adjust wages based on labor excess supply/demand
+                wages_solved_mat[:, 2] *= (1.0 + gamma_w * np.clip(excess_skilled / np.clip(labor_supply_mat[:, 2], 1.0, None), -0.2, 0.2))
+                wages_solved_mat[:, 1] *= (1.0 + gamma_w * np.clip(excess_semiskilled / np.clip(labor_supply_mat[:, 1], 1.0, None), -0.2, 0.2))
+                wages_solved_mat[:, 0] *= (1.0 + gamma_w * np.clip(excess_unskilled / np.clip(labor_supply_mat[:, 0], 1.0, None), -0.2, 0.2))
+                wages_solved_mat = np.clip(wages_solved_mat, 1e2, 1e7)
+                
+            wu_solved = wages_solved_mat[:, 0]
+            wm_solved = wages_solved_mat[:, 1]
+            ws_solved = wages_solved_mat[:, 2]
+
+        # Re-evaluate final outputs, imports and exports
+        _, y_val, imports, exports = self.evaluate_cge_algebra(
+            prices=prices_solved_mat,
+            w_unskilled=wu_solved,
+            w_semiskilled=wm_solved,
+            w_skilled=ws_solved,
+            capital_mat=capital_mat,
+            labor_supply_mat=labor_supply_mat,
+            tfp_mat=tfp_mat,
+            energy_util_mat=energy_util_mat,
+            hh_demands_mat=hh_demands_mat,
+            exchange_rate=exchange_rate
+        )
         
-        # Unpack solved multipliers and clip
-        solved_mult = np.clip(res.x, 1e-3, 1e9)
-        prices_mult = solved_mult[0:self.N].reshape((self.R, self.S))
-        wages_skilled_mult = solved_mult[self.N:self.N+self.R]
-        wages_semiskilled_mult = solved_mult[self.N+self.R:self.N+2*self.R]
-        wages_unskilled_mult = solved_mult[self.N+2*self.R:self.N+3*self.R]
-        
-        # Re-construct wages and prices
+        # Populate results
         prices_solved = {}
         for r_idx, r in enumerate(self.regions):
             prices_solved[r] = {}
             for s_idx, s in enumerate(self.sectors):
-                prices_solved[r][s] = prices_init_mat[r_idx, s_idx] * prices_mult[r_idx, s_idx]
+                prices_solved[r][s] = prices_solved_mat[r_idx, s_idx]
                 
         wages_solved = {}
         for r_idx, r in enumerate(self.regions):
             wages_solved[r] = {
-                'unskilled': wages_base_mat[r_idx, 0] * wages_unskilled_mult[r_idx],
-                'semi-skilled': wages_base_mat[r_idx, 1] * wages_semiskilled_mult[r_idx],
-                'skilled': wages_base_mat[r_idx, 2] * wages_skilled_mult[r_idx]
+                'unskilled': wu_solved[r_idx],
+                'semi-skilled': wm_solved[r_idx],
+                'skilled': ws_solved[r_idx]
             }
             
-        # Re-evaluate final gross outputs
-        prices_solved_mat = prices_init_mat * prices_mult
-        rk = prices_solved_mat * 0.15
-        pe = prices_solved_mat[:, 3]
-        pe_bc = pe[:, np.newaxis]
-        
-        sig_KE = self.sigma_KE
-        p_KE = (self.theta_K ** sig_KE * rk**(1-sig_KE) + 
-                self.theta_E ** sig_KE * pe_bc**(1-sig_KE)) ** (1.0/(1.0-sig_KE))
-        
-        wu = wages_base_mat[:, 0] * wages_unskilled_mult
-        wm = wages_base_mat[:, 1] * wages_semiskilled_mult
-        ws = wages_base_mat[:, 2] * wages_skilled_mult
-        sig_L = self.sigma_L
-        w_L = (self.theta_u ** sig_L * wu**(1-sig_L) + 
-               self.theta_m ** sig_L * wm**(1-sig_L) + 
-               self.theta_s ** sig_L * ws**(1-sig_L)) ** (1.0/(1.0-sig_L))
-        
-        sig_VA = self.sigma_VA
-        w_L_bc = w_L[:, np.newaxis]
-        p_VA = (self.theta_L ** sig_VA * w_L_bc**(1-sig_VA) + 
-                self.theta_KE ** sig_VA * p_KE**(1-sig_VA)) ** (1.0/(1.0-sig_VA))
-        
-        cap_factor = (capital_mat ** 0.50) * energy_util_mat
-        y_val = tfp_mat * cap_factor * (prices_solved_mat / np.clip(p_VA, 1e-2, None)) ** 0.50
-        
         realized_output = {}
+        self.realized_imports = {}
+        self.realized_exports = {}
         for r_idx, r in enumerate(self.regions):
             for s_idx, s in enumerate(self.sectors):
                 realized_output[(r, s)] = max(1e-3, y_val[r_idx, s_idx])
+                self.realized_imports[(r, s)] = float(imports[r_idx, s_idx])
+                self.realized_exports[(r, s)] = float(exports[r_idx, s_idx])
                 
         return realized_output, prices_solved, wages_solved

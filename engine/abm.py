@@ -38,7 +38,7 @@ class ABMEngine:
     High-performance Vectorized Columnar Agent-Based Model engine.
     Manages 3.4 million agents using flat numpy arrays for high speed and low memory usage.
     """
-    def __init__(self, regions, sectors, num_households=3400000):
+    def __init__(self, regions, sectors, num_households=3400000, distances=None):
         self.regions = regions
         self.sectors = sectors
         self.R = len(regions)
@@ -46,7 +46,10 @@ class ABMEngine:
         self.num_households = num_households
         
         # Initialize distance matrix
-        self.distances = self._init_distance_matrix()
+        if distances is not None:
+            self.distances = distances
+        else:
+            self.distances = self._init_distance_matrix()
         
         # Micro database (flat columnar NumPy arrays)
         self.agent_region = None
@@ -188,7 +191,7 @@ class ABMEngine:
         p_indices = np.zeros(self.R)
         risks = np.zeros(self.R)
         for r_idx, r in enumerate(self.regions):
-            p_indices[r_idx] = (prices[r]['ConsumerGoods'] + prices[r]['Energy']) / 2.0
+            p_indices[r_idx] = sum(budget_shares.get(s, 1.0 / self.S) * prices[r][s] for s in self.sectors)
             risks[r_idx] = scenario_modifiers.get('frontline_states', {}).get(r, 0)
             if risks[r_idx] == 1:
                 risks[r_idx] = 0.5

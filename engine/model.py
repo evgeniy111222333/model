@@ -11,6 +11,7 @@ class ModelRunner:
     Main controller for the Hybrid AB-CGE Ukraine Economic Simulator.
     Coordinates demographic Leslie aging, micro agent-based migration and consumption,
     macro general equilibrium clearing, and commercial banking/fiscal policy.
+    Supports 93 sub-sectors and dynamic frontline transitions.
     """
     def __init__(self, base_data, num_households=3400000):
         self.regions = base_data['regions']
@@ -34,15 +35,26 @@ class ModelRunner:
             sectors=self.sectors
         )
         
+        # Initialize distance and frontline states
+        self.distances = base_data.get('distances')
+        self.frontline_states = {}
+        for r in self.regions:
+            if r in ['Donetsk', 'Luhansk', 'Crimea', 'Sevastopol']:
+                self.frontline_states[r] = 2 # Occupied
+            elif r in ['Kharkiv', 'Zaporizhzhia', 'Kherson', 'Mykolaiv']:
+                self.frontline_states[r] = 1 # Frontline
+            else:
+                self.frontline_states[r] = 0 # Safe
+        
         # Initialize ABM Engine & Agents
         self.num_households = num_households
-        self.abm = ABMEngine(self.regions, self.sectors, num_households=self.num_households)
+        self.abm = ABMEngine(self.regions, self.sectors, num_households=self.num_households, distances=self.distances)
         self.capital = copy.deepcopy(base_data['initial_capital'])
         self.abm.initialize_agents(self.initial_pop, self.capital)
         
         # Initialize CGE Solver
         self.base_tech = copy.deepcopy(base_data['base_tech_coefficients'])
-        self.cge = CGESolver(self.regions, self.sectors, self.base_tech)
+        self.cge = CGESolver(self.regions, self.sectors, self.base_tech, distances=self.distances)
         
         self.finance = FinanceEngine()
         
@@ -56,6 +68,50 @@ class ModelRunner:
         self.wages_by_type = copy.deepcopy(base_data['wages_by_type'])
         
         self.refugee_pool = 5.0e6
+
+    def _update_frontline_states(self, scenario_name, year):
+        """
+        Applies dynamic geopolitical trajectories to frontline states based on scenario and year.
+        """
+        if scenario_name == 'optimistic':
+            # Rapid liberation
+            if year == 2028:
+                self.frontline_states['Mykolaiv'] = 0
+                self.frontline_states['Kherson'] = 0
+            elif year == 2030:
+                self.frontline_states['Kharkiv'] = 0
+                self.frontline_states['Zaporizhzhia'] = 0
+            elif year == 2032:
+                # Contested transitions (Occupied -> Frontline combat)
+                self.frontline_states['Donetsk'] = 1
+                self.frontline_states['Luhansk'] = 1
+            elif year == 2035:
+                # Fully liberated
+                self.frontline_states['Donetsk'] = 0
+                self.frontline_states['Luhansk'] = 0
+            elif year == 2038:
+                self.frontline_states['Crimea'] = 1
+                self.frontline_states['Sevastopol'] = 1
+            elif year == 2042:
+                self.frontline_states['Crimea'] = 0
+                self.frontline_states['Sevastopol'] = 0
+        elif scenario_name == 'pessimistic':
+            # Prolonged war of attrition, border flare-ups
+            if 2028 <= year <= 2035:
+                self.frontline_states['Sumy'] = 1
+                self.frontline_states['Chernihiv'] = 1
+            else:
+                self.frontline_states['Sumy'] = 0
+                self.frontline_states['Chernihiv'] = 0
+        else: # baseline
+            # Stalemate followed by slow long-term stabilization
+            if year == 2030:
+                self.frontline_states['Mykolaiv'] = 0
+            elif year == 2032:
+                self.frontline_states['Kherson'] = 0
+            elif year == 2040:
+                self.frontline_states['Kharkiv'] = 0
+                self.frontline_states['Zaporizhzhia'] = 0
 
     def run_simulation(self, scenario_name, scenario_engine, num_years=25, lhs_sample=None):
         """
@@ -86,26 +142,17 @@ class ModelRunner:
                 mods['war_damage'] = {}
                 mods['export_shock'] = 1.0
                 
-            # Initialize frontline states for all regions (default to 0: Safe)
-            frontline_states = mods.get('frontline_states', {})
-            for r in self.regions:
-                if r not in frontline_states:
-                    # In baseline, Donbas / Crimea start high-risk or occupied
-                    if r in ['Donetsk', 'Luhansk', 'Crimea', 'Sevastopol']:
-                        frontline_states[r] = 2 # Occupied
-                    elif r in ['Kharkiv', 'Zaporizhzhia', 'Kherson', 'Mykolaiv']:
-                        frontline_states[r] = 1 # Frontline / High-risk
-                    else:
-                        frontline_states[r] = 0 # Safe
-            mods['frontline_states'] = frontline_states
+            # Update frontline states dynamically
+            self._update_frontline_states(scenario_name, year)
+            mods['frontline_states'] = copy.deepcopy(self.frontline_states)
             
             # 2. Demographic Step (Leslie aging, fertility, natural mortality on 3.4M agents)
             demo_results = self.demographics.step(year, mods, abm=self.abm)
             self.refugee_pool = demo_results['refugees_remaining']
             
             # 3. Frontline Displacement (IDPs flee occupied regions)
-            occupied_indices = [self.regions.index(r) for r in self.regions if frontline_states[r] == 2]
-            safe_indices = [self.regions.index(r) for r in self.regions if frontline_states[r] == 0]
+            occupied_indices = [self.regions.index(r) for r in self.regions if self.frontline_states[r] == 2]
+            safe_indices = [self.regions.index(r) for r in self.regions if self.frontline_states[r] == 0]
             if len(safe_indices) == 0:
                 safe_indices = [r_idx for r_idx in range(self.R) if r_idx not in occupied_indices]
                 
@@ -113,12 +160,11 @@ class ModelRunner:
                 in_occupied = np.isin(self.abm.agent_region, occupied_indices) & (self.abm.agent_health != 2)
                 N_flee = np.sum(in_occupied)
                 if N_flee > 0:
-                    # Displacement: flee to safe regions
                     self.abm.agent_region[in_occupied] = np.random.choice(safe_indices, size=N_flee)
 
             # 4. Energy Grid Constraints Update
             for r_idx, r in enumerate(self.regions):
-                state = frontline_states[r]
+                state = self.frontline_states[r]
                 for s in self.sectors:
                     rec = mods.get('energy_recovery', 0.04)
                     dmg = mods['war_damage'].get(r, {}).get(s, 0.0)
@@ -132,10 +178,9 @@ class ModelRunner:
                     self.energy_utilization[r][s] = next_util
 
             # 5. Apply Human Capital modifier (HCI) to regional TFP
-            # HCI = (1 - 0.2 * disabled_rate) * (1 + 0.15 * skilled_rate)
             regional_tfp = copy.deepcopy(self.tfp)
             for r_idx, r in enumerate(self.regions):
-                state = frontline_states[r]
+                state = self.frontline_states[r]
                 
                 # Calculate disability and skill shares
                 r_pop = self.demographics.pop_array[r_idx]
@@ -157,7 +202,6 @@ class ModelRunner:
                     
                 hci = (1.0 - 0.20 * disabled_rate) * (1.0 + 0.15 * skilled_rate)
                 
-                # Apply frontline modifier
                 frontline_mult = 1.0
                 if state == 1:
                     frontline_mult = 0.60 # TFP reduced by 40%
@@ -178,14 +222,15 @@ class ModelRunner:
                 scenario_modifiers=mods
             )
             
-            # 7. Macro-CGE Market Clearing Step (Solve 486 clearing equations)
+            # 7. Macro-CGE Market Clearing Step (Solve CGE clearing equations)
             realized_output, prices_solved, wages_solved = self.cge.solve_equilibrium(
                 capital=self.capital,
                 labor_supply_by_type=labor_supply,
                 tfp=regional_tfp,
                 prices_init=self.prices,
                 energy_utilization=self.energy_utilization,
-                household_demands=aggregate_consumption
+                household_demands=aggregate_consumption,
+                exchange_rate=self.finance.exchange_rate
             )
             
             self.prices = prices_solved
@@ -198,9 +243,8 @@ class ModelRunner:
             regional_grp_real = {r: 0.0 for r in self.regions}
             
             for r in self.regions:
-                state = frontline_states[r]
+                state = self.frontline_states[r]
                 if state == 2:
-                    # Occupied region has 0 output, wages, GRP
                     continue
                     
                 ws = self.wages_by_type[r]['skilled']
@@ -218,7 +262,6 @@ class ModelRunner:
                 for s in self.sectors:
                     out_val_nominal = realized_output[(r, s)] * self.prices[r][s]
                     
-                    # Intermediate inputs nominal costs
                     int_cost_nominal = 0.0
                     for sx_idx, sx in enumerate(self.sectors):
                         coeff = self.base_tech.get(s, {}).get(sx, 0.0)
@@ -243,11 +286,10 @@ class ModelRunner:
             nominal_gdp_uah = sum(regional_grp_nominal.values())
             nominal_gdp_usd = nominal_gdp_uah / self.finance.exchange_rate
             
-            # Export / Import totals (USD)
-            total_exports_usd = sum(realized_output[(r, s)] * 0.15 for r in self.regions for s in ['Agriculture', 'Metallurgy', 'IT'] if frontline_states[r] != 2) / self.finance.exchange_rate
-            total_imports_usd = sum(realized_output[(r, s)] * 0.18 for r in self.regions for s in self.sectors if frontline_states[r] != 2) / self.finance.exchange_rate
+            # Export / Import totals (USD) from endogenous trade
+            total_exports_usd = sum(self.cge.realized_exports[(r, s)] for r in self.regions for s in self.sectors if self.frontline_states[r] != 2) / self.finance.exchange_rate
+            total_imports_usd = sum(self.cge.realized_imports[(r, s)] for r in self.regions for s in self.sectors if self.frontline_states[r] != 2) / self.finance.exchange_rate
             
-            # Get aggregate household savings to update bank deposits
             # Living agents wealth
             household_wealth_sum = float(np.sum(self.abm.agent_wealth[self.abm.agent_health != 2]))
 
@@ -265,20 +307,18 @@ class ModelRunner:
             )
             
             # 9. Dynamic Capital Accumulation with Bank Lending
-            # Total investment capital includes FDI, aid loans, reinvested profits, and bank loans
             bank_loans_added = fin_results['bank_loans']
             fdi_uah = mods.get('fdi_usd', 1.5e9) * fin_results['exchange_rate']
             aid_loans_uah = mods.get('foreign_aid_usd', 22.0e9) * (1.0 - mods.get('foreign_aid_grant_share', 0.50)) * fin_results['exchange_rate']
             reinvested_profits = total_profits * 0.20
             
-            total_investment = fdi_uah + aid_loans_uah + reinvested_profits + bank_loans_added * 0.05 # 5% of loan pool channeled to new fixed capital investments annually
+            total_investment = fdi_uah + aid_loans_uah + reinvested_profits + bank_loans_added * 0.05
             
             investment_allocation = {}
             for r in self.regions:
                 investment_allocation[r] = {}
-                state = frontline_states[r]
+                state = self.frontline_states[r]
                 if state == 2:
-                    # Occupied region receives 0 investment
                     for s in self.sectors:
                         investment_allocation[r][s] = 0.0
                     continue
@@ -295,18 +335,16 @@ class ModelRunner:
                 war_damage=mods['war_damage']
             )
             
-            # Frontline regions state 1 has 15% higher capital depreciation
             for r in self.regions:
-                state = frontline_states[r]
+                state = self.frontline_states[r]
                 if state == 1:
                     for s in self.sectors:
                         self.capital[r][s] = max(1e-3, self.capital[r][s] * (1.0 - 0.15))
                 elif state == 2:
-                    # Occupied capital is frozen/destroyed
                     for s in self.sectors:
                         self.capital[r][s] = 1e-3
             
-            # Sync capital back to Firm Agents in the ABM
+            # Sync capital back to Firm Agents
             for r in self.regions:
                 for s in self.sectors:
                     self.abm.firms[r][s].capital = self.capital[r][s]
@@ -340,7 +378,7 @@ class ModelRunner:
                     'pop': sum(self.demographics.pop[r][g].sum() for g in ['Male', 'Female']),
                     'wage_skilled': self.wages_by_type[r]['skilled'],
                     'wage_unskilled': self.wages_by_type[r]['unskilled'],
-                    'frontline_state': int(frontline_states[r]),
+                    'frontline_state': int(self.frontline_states[r]),
                     'sectors': {s: {
                         'output': realized_output[(r, s)],
                         'capital': self.capital[r][s],

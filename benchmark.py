@@ -12,10 +12,12 @@ def run_performance_profile():
     start_time = time.time()
     
     # 1. Load Data
-    print("Step 1: Initializing baseline data (27 regions, 15 sectors = 405 nodes)...")
     t0 = time.time()
     base_data = generate_baseline_data()
     t_data = time.time() - t0
+    num_regs = len(base_data['regions'])
+    num_secs = len(base_data['sectors'])
+    print(f"Step 1: Initializing baseline data ({num_regs} regions, {num_secs} sectors = {num_regs * num_secs} nodes)...")
     print(f"-> Completed in {t_data:.4f} seconds.")
     
     # 2. Setup engines

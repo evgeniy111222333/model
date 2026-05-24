@@ -1,4 +1,13 @@
 import numpy as np
+import os
+import csv
+
+# List of 15 parent sectors
+PARENT_SECTORS = [
+    'Agriculture', 'ConsumerGoods', 'Metallurgy', 'Energy', 'IT',
+    'Machinery', 'MilitaryIndustrial', 'Construction', 'Transport',
+    'Retail', 'Finance', 'Healthcare', 'PublicAdmin', 'Chemicals', 'Tourism'
+]
 
 # List of 27 regions (oblasts, Autonomous Republic of Crimea, Kyiv, Sevastopol)
 REGIONS = [
@@ -8,12 +17,164 @@ REGIONS = [
     'Volyn', 'Zakarpattia', 'Zaporizhzhia', 'Zhytomyr', 'Crimea', 'Kyiv_City', 'Sevastopol'
 ]
 
-# List of 15 sectors
-SECTORS = [
-    'Agriculture', 'ConsumerGoods', 'Metallurgy', 'Energy', 'IT',
-    'Machinery', 'MilitaryIndustrial', 'Construction', 'Transport',
-    'Retail', 'Finance', 'Healthcare', 'PublicAdmin', 'Chemicals', 'Tourism'
-]
+# Define 93 sub-sectors and their parent mapping
+SUB_SECTORS = {
+    # 🌾 Agriculture & Natural Resources (7)
+    'AgriGrain': 'Agriculture',
+    'AgriTechnical': 'Agriculture',
+    'AgriLivestock': 'Agriculture',
+    'Forestry': 'Agriculture',
+    'Fishery': 'Agriculture',
+    'CoalMining': 'Energy',
+    'OilGasExtraction': 'Energy',
+    
+    # ⚙️ Heavy Industry (10)
+    'SteelIron': 'Metallurgy',
+    'MetalProducts': 'Metallurgy',
+    'NonFerrousMetal': 'Metallurgy',
+    'IronOreMining': 'Metallurgy',
+    'ChemicalFertilizers': 'Chemicals',
+    'IndustrialChemicals': 'Chemicals',
+    'PetrochemicalsPlastics': 'Chemicals',
+    'BuildingMaterials': 'Chemicals',
+    'PulpPaper': 'Chemicals',
+    'NonMetalMining': 'Chemicals',
+    
+    # 🔬 Pharma & Biotechnology (6)
+    'PharmaAPI': 'Chemicals',
+    'PharmaGenerics': 'Chemicals',
+    'PharmaOriginals': 'Chemicals',
+    'MedicalDevices': 'Chemicals',
+    'Biotechnologies': 'Chemicals',
+    'VeterinaryDrugs': 'Chemicals',
+    
+    # 🏭 Machinery (7)
+    'HeavyMachinery': 'Machinery',
+    'TransportMachinery': 'Machinery',
+    'AgriMachinery': 'Machinery',
+    'ElectricalEquipment': 'Machinery',
+    'PrecisionInstruments': 'Machinery',
+    'ElectronicsComponents': 'Machinery',
+    'IndustrialRobots': 'Machinery',
+    
+    # 🪖 Military-Industrial Complex (8)
+    'MilSmallArms': 'MilitaryIndustrial',
+    'MilArmoredVehicles': 'MilitaryIndustrial',
+    'MilArtillery': 'MilitaryIndustrial',
+    'MilMissiles': 'MilitaryIndustrial',
+    'MilUAVs': 'MilitaryIndustrial',
+    'MilEW': 'MilitaryIndustrial',
+    'MilNaval': 'MilitaryIndustrial',
+    'MilProtectiveGear': 'MilitaryIndustrial',
+    
+    # ⚡ Energy (7)
+    'EnergyThermal': 'Energy',
+    'EnergyNuclearGen': 'Energy',
+    'EnergyNuclearFuel': 'Energy',
+    'EnergyNuclearWaste': 'Energy',
+    'EnergySolar': 'Energy',
+    'EnergyWindHydro': 'Energy',
+    'EnergyTransmission': 'Energy',
+    
+    # 🏗️ Construction & Real Estate (5)
+    'ConstResidential': 'Construction',
+    'ConstCommercial': 'Construction',
+    'ConstInfrastructure': 'Construction',
+    'ConstReconstruction': 'Construction',
+    'RealEstateOps': 'Construction',
+    
+    # 🍞 Light & Food Industry (6)
+    'FoodProcessing': 'ConsumerGoods',
+    'Beverages': 'Tourism',
+    'Tobacco': 'Tourism',
+    'TextilesApparel': 'ConsumerGoods',
+    'LeatherFootwear': 'ConsumerGoods',
+    'FurnitureHome': 'ConsumerGoods',
+    
+    # 🚛 Transport & Logistics (6)
+    'TransRailCargo': 'Transport',
+    'TransRailPassenger': 'Transport',
+    'TransRoad': 'Transport',
+    'TransWater': 'Transport',
+    'TransAir': 'Transport',
+    'LogisticsWarehouse': 'Transport',
+    
+    # 🛒 Trade & Consumer Services (4)
+    'TradeWholesale': 'Retail',
+    'TradeRetail': 'Retail',
+    'FoodServices': 'Tourism',
+    'HotelsTourism': 'Tourism',
+    
+    # 💻 IT & Telecom (6)
+    'ITServicesExport': 'IT',
+    'ITProductSaaS': 'IT',
+    'Telecom': 'IT',
+    'InternetCloud': 'IT',
+    'MediaAdvertising': 'IT',
+    'Cybersecurity': 'IT',
+    
+    # 🏦 Banking & Finance (7)
+    'BankState': 'Finance',
+    'BankCommercial': 'Finance',
+    'BankRetail': 'Finance',
+    'Insurance': 'Finance',
+    'NonBankFinance': 'Finance',
+    'SecuritiesMarket': 'Finance',
+    'InternationalFinance': 'Finance',
+    
+    # 🔬 Science, R&D & Education (5)
+    'AcadScience': 'PublicAdmin',
+    'AppliedRD': 'PublicAdmin',
+    'HigherEducation': 'PublicAdmin',
+    'GeneralEduVoc': 'PublicAdmin',
+    'EdTech': 'PublicAdmin',
+    
+    # 🏥 Healthcare (4)
+    'HealthPublic': 'Healthcare',
+    'HealthPrivate': 'Healthcare',
+    'HealthRehab': 'Healthcare',
+    'HealthMental': 'Healthcare',
+    
+    # 🏛️ Public Sector & Security (5)
+    'PublicAdmin': 'PublicAdmin',
+    'LawEnforcement': 'PublicAdmin',
+    'UtilityServices': 'PublicAdmin',
+    'GasHeatSupply': 'PublicAdmin',
+    'MilitaryDefense': 'PublicAdmin'
+}
+
+SECTORS = sorted(list(SUB_SECTORS.keys()))
+
+# Subsector supply weights (used to distribute parent variables)
+SUPPLY_WEIGHTS = {
+    'AgriGrain': 0.40, 'AgriTechnical': 0.30, 'AgriLivestock': 0.20, 'Forestry': 0.08, 'Fishery': 0.02,
+    'SteelIron': 0.45, 'MetalProducts': 0.30, 'NonFerrousMetal': 0.15, 'IronOreMining': 0.10,
+    'ChemicalFertilizers': 0.12, 'IndustrialChemicals': 0.10, 'PetrochemicalsPlastics': 0.15,
+    'BuildingMaterials': 0.13, 'PulpPaper': 0.05, 'NonMetalMining': 0.05,
+    'PharmaAPI': 0.05, 'PharmaGenerics': 0.15, 'PharmaOriginals': 0.08,
+    'MedicalDevices': 0.06, 'Biotechnologies': 0.04, 'VeterinaryDrugs': 0.02,
+    'HeavyMachinery': 0.25, 'TransportMachinery': 0.20, 'AgriMachinery': 0.15,
+    'ElectricalEquipment': 0.15, 'PrecisionInstruments': 0.10, 'ElectronicsComponents': 0.10,
+    'IndustrialRobots': 0.05,
+    'MilSmallArms': 0.15, 'MilArmoredVehicles': 0.25, 'MilArtillery': 0.20, 'MilMissiles': 0.10,
+    'MilUAVs': 0.15, 'MilEW': 0.08, 'MilNaval': 0.03, 'MilProtectiveGear': 0.04,
+    'CoalMining': 0.08, 'OilGasExtraction': 0.12,
+    'EnergyThermal': 0.20, 'EnergyNuclearGen': 0.25, 'EnergyNuclearFuel': 0.05,
+    'EnergyNuclearWaste': 0.03, 'EnergySolar': 0.07, 'EnergyWindHydro': 0.05,
+    'EnergyTransmission': 0.10, 'GasHeatSupply': 0.05,
+    'ConstResidential': 0.30, 'ConstCommercial': 0.25, 'ConstInfrastructure': 0.25,
+    'ConstReconstruction': 0.15, 'RealEstateOps': 0.05,
+    'FoodProcessing': 0.50, 'TextilesApparel': 0.20, 'LeatherFootwear': 0.15, 'FurnitureHome': 0.15,
+    'TransRailCargo': 0.30, 'TransRailPassenger': 0.10, 'TransRoad': 0.30,
+    'TransWater': 0.05, 'TransAir': 0.05, 'LogisticsWarehouse': 0.20,
+    'TradeWholesale': 0.40, 'TradeRetail': 0.60,
+    'BankState': 0.25, 'BankCommercial': 0.35, 'BankRetail': 0.20,
+    'Insurance': 0.08, 'NonBankFinance': 0.05, 'SecuritiesMarket': 0.05, 'InternationalFinance': 0.02,
+    'HealthPublic': 0.50, 'HealthPrivate': 0.30, 'HealthRehab': 0.15, 'HealthMental': 0.05,
+    'PublicAdmin': 0.30, 'LawEnforcement': 0.15, 'UtilityServices': 0.10, 'MilitaryDefense': 0.20,
+    'AcadScience': 0.03, 'AppliedRD': 0.07, 'HigherEducation': 0.08, 'GeneralEduVoc': 0.06, 'EdTech': 0.01,
+    'Beverages': 0.25, 'Tobacco': 0.15, 'FoodServices': 0.40, 'HotelsTourism': 0.20
+}
 
 # Geographic coordinates (latitude, longitude) of capital cities for the 27 regions
 COORDINATES = {
@@ -26,7 +187,7 @@ COORDINATES = {
     'Kharkiv': (49.9935, 36.2304),
     'Kherson': (46.6354, 32.6169),
     'Khmelnytskyi': (49.4230, 26.9871),
-    'Kyiv_Oblast': (50.4501, 30.5234), # Sourced around Kyiv city
+    'Kyiv_Oblast': (50.4501, 30.5234),
     'Kirovohrad': (48.5079, 32.2623),
     'Luhansk': (48.5740, 39.3078),
     'Lviv': (49.8397, 24.0297),
@@ -48,55 +209,26 @@ COORDINATES = {
 
 def load_base_technical_coefficients():
     """
-    Returns direct requirements technical coefficients matrix for the 15 sectors.
+    Loads direct requirements technical coefficients matrix for the 93 sectors
+    from data/io_ukraine_2026.csv.
     """
-    return {
-        'Agriculture': {
-            'Energy': 0.08, 'Chemicals': 0.10, 'Transport': 0.06, 'Finance': 0.02, 'Agriculture': 0.08
-        },
-        'ConsumerGoods': {
-            'Agriculture': 0.22, 'Chemicals': 0.05, 'Energy': 0.06, 'Transport': 0.07, 'Finance': 0.03
-        },
-        'Metallurgy': {
-            'Energy': 0.16, 'Transport': 0.10, 'Chemicals': 0.04, 'Finance': 0.03, 'Metallurgy': 0.12
-        },
-        'Energy': {
-            'Metallurgy': 0.04, 'Transport': 0.03, 'Chemicals': 0.05, 'Finance': 0.02, 'Energy': 0.08
-        },
-        'IT': {
-            'Energy': 0.03, 'Finance': 0.06, 'ConsumerGoods': 0.02, 'IT': 0.05
-        },
-        'Machinery': {
-            'Metallurgy': 0.20, 'Energy': 0.07, 'Chemicals': 0.04, 'Transport': 0.05, 'Finance': 0.04
-        },
-        'MilitaryIndustrial': {
-            'Metallurgy': 0.15, 'Machinery': 0.18, 'Chemicals': 0.08, 'Energy': 0.09, 'Transport': 0.06, 'IT': 0.08
-        },
-        'Construction': {
-            'Metallurgy': 0.12, 'Energy': 0.05, 'Chemicals': 0.06, 'Transport': 0.08, 'Finance': 0.03
-        },
-        'Transport': {
-            'Energy': 0.18, 'Machinery': 0.08, 'Finance': 0.04, 'Transport': 0.05
-        },
-        'Retail': {
-            'ConsumerGoods': 0.30, 'Energy': 0.04, 'Transport': 0.06, 'Finance': 0.05
-        },
-        'Finance': {
-            'IT': 0.07, 'Energy': 0.02, 'Finance': 0.10
-        },
-        'Healthcare': {
-            'Chemicals': 0.15, 'Energy': 0.04, 'Finance': 0.02
-        },
-        'PublicAdmin': {
-            'Energy': 0.05, 'Transport': 0.04, 'IT': 0.06, 'Finance': 0.02
-        },
-        'Chemicals': {
-            'Energy': 0.12, 'Chemicals': 0.10, 'Transport': 0.05, 'Finance': 0.03
-        },
-        'Tourism': {
-            'ConsumerGoods': 0.10, 'Energy': 0.06, 'Transport': 0.12, 'Retail': 0.05
-        }
-    }
+    csv_path = os.path.join(os.path.dirname(__file__), 'io_ukraine_2026.csv')
+    if os.path.exists(csv_path):
+        coefficients = {s: {} for s in SECTORS}
+        with open(csv_path, mode='r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                supplying_sector = row['Sector']
+                if supplying_sector not in SECTORS:
+                    continue
+                for consuming_sector in SECTORS:
+                    val = float(row.get(consuming_sector, 0.0))
+                    if val > 0:
+                        coefficients[consuming_sector][supplying_sector] = val
+        return coefficients
+    else:
+        # Emergency fallback (should not occur since we generate the file)
+        return {s: {} for s in SECTORS}
 
 def calculate_geographic_distances():
     """
@@ -122,13 +254,13 @@ def calculate_geographic_distances():
                 
                 a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
                 c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-                dist[i, j] = R * c * 1.3 # 30% curvature adjustment for real road detours
+                dist[i, j] = max(1.0, R * c * 1.3) # 30% curvature adjustment, floored at 1.0 km to prevent division by zero
     return dist
 
 def generate_baseline_data():
     """
     Procedurally synthesizes the baseline state for Ukraine's economy in 2026.
-    Uses 18 five-year cohorts, real coordinates, and 3 labor types.
+    Uses 18 five-year cohorts, real coordinates, and 3 labor types for 93 sectors.
     """
     np.random.seed(42)
     
@@ -149,8 +281,6 @@ def generate_baseline_data():
     fertility_rates = {}
     mortality_rates = {}
     
-    # Realistic age-specific structure shares (18 cohorts)
-    # Reflects declining birth rate, aging population, and war gender imbalance
     cohort_shares_male = np.array([
         0.052, 0.051, 0.050, 0.055, 0.062, 0.068, 0.072, 0.075, 0.072, 
         0.068, 0.062, 0.058, 0.052, 0.048, 0.040, 0.030, 0.020, 0.015
@@ -160,7 +290,6 @@ def generate_baseline_data():
         0.068, 0.065, 0.062, 0.058, 0.055, 0.050, 0.042, 0.032, 0.025
     ])
     
-    # Normalize shares
     cohort_shares_male /= np.sum(cohort_shares_male)
     cohort_shares_female /= np.sum(cohort_shares_female)
     
@@ -176,15 +305,13 @@ def generate_baseline_data():
             'Female': f_pop * cohort_shares_female
         }
         
-        # Fertility modifier
-        if r in ['Kyiv_City', 'Kharkiv', 'Lviv', 'Odesa']:
+        if r in ['Kyiv_City', 'Kharkiv', 'Odesa', 'Lviv']:
             fertility_rates[r] = 0.85
         elif r in ['Zakarpattia', 'Volyn', 'Rivne', 'Ivano-Frankivsk']:
             fertility_rates[r] = 1.15
         else:
             fertility_rates[r] = 1.0
             
-        # Baseline mortality (18 cohorts)
         mortality_rates[r] = {
             'Male': np.array([
                 0.0015, 0.0003, 0.0004, 0.0012, 0.0018, 0.0022, 0.0028, 0.0035, 
@@ -226,39 +353,54 @@ def generate_baseline_data():
         reg_weight = reg_grp_weights.get(r, 0.01) / total_grp_weight
         reg_total_cap = total_capital * reg_weight
         
-        sector_weights = {s: 1.0 for s in SECTORS}
+        # Parent weights
+        parent_weights = {p: 1.0 for p in PARENT_SECTORS}
         
         if r == 'Kyiv_City':
-            sector_weights['IT'] = 5.0
-            sector_weights['Finance'] = 4.0
-            sector_weights['Retail'] = 3.0
-            sector_weights['PublicAdmin'] = 3.0
-            sector_weights['Agriculture'] = 0.05
-            sector_weights['Metallurgy'] = 0.05
+            parent_weights['IT'] = 5.0
+            parent_weights['Finance'] = 4.0
+            parent_weights['Retail'] = 3.0
+            parent_weights['PublicAdmin'] = 3.0
+            parent_weights['Agriculture'] = 0.05
+            parent_weights['Metallurgy'] = 0.05
         elif r in ['Dnipro', 'Zaporizhzhia', 'Donetsk', 'Luhansk']:
-            sector_weights['Metallurgy'] = 5.0
-            sector_weights['Machinery'] = 3.0
-            sector_weights['Energy'] = 3.0
-            sector_weights['IT'] = 0.5
+            parent_weights['Metallurgy'] = 5.0
+            parent_weights['Machinery'] = 3.0
+            parent_weights['Energy'] = 3.0
+            parent_weights['IT'] = 0.5
         elif r in ['Poltava', 'Vinnytsia', 'Cherkasy', 'Kirovohrad', 'Khmelnytskyi']:
-            sector_weights['Agriculture'] = 4.0
-            sector_weights['ConsumerGoods'] = 2.0
-            sector_weights['Metallurgy'] = 0.1
+            parent_weights['Agriculture'] = 4.0
+            parent_weights['ConsumerGoods'] = 2.0
+            parent_weights['Metallurgy'] = 0.1
         elif r in ['Lviv', 'Kharkiv']:
-            sector_weights['IT'] = 3.0
-            sector_weights['Machinery'] = 2.0
-            sector_weights['Tourism'] = 2.5
-            sector_weights['Agriculture'] = 0.5
+            parent_weights['IT'] = 3.0
+            parent_weights['Machinery'] = 2.0
+            parent_weights['Tourism'] = 2.5
+            parent_weights['Agriculture'] = 0.5
         elif r in ['Odesa', 'Mykolaiv', 'Kherson']:
-            sector_weights['Transport'] = 4.0
-            sector_weights['Agriculture'] = 2.0
-            sector_weights['Tourism'] = 2.0
-            sector_weights['Metallurgy'] = 0.3
+            parent_weights['Transport'] = 4.0
+            parent_weights['Agriculture'] = 2.0
+            parent_weights['Tourism'] = 2.0
+            parent_weights['Metallurgy'] = 0.3
             
-        sum_sw = sum(sector_weights.values())
+        # Distribute parent weights to sub-sectors
+        subsector_weights = {}
+        for s in SECTORS:
+            p = SUB_SECTORS[s]
+            p_w = parent_weights.get(p, 1.0)
+            sub_w = SUPPLY_WEIGHTS.get(s, 1.0)
+            
+            # Normalize subsector weights per parent group
+            siblings = [sib for sib, parent in SUB_SECTORS.items() if parent == p]
+            tot_sib_w = sum(SUPPLY_WEIGHTS.get(sib, 1.0) for sib in siblings)
+            norm_sub_w = sub_w / (tot_sib_w if tot_sib_w > 0 else 1.0)
+            
+            subsector_weights[s] = p_w * norm_sub_w
+            
+        sum_sw = sum(subsector_weights.values())
         
         for s in SECTORS:
-            share = sector_weights[s] / sum_sw
+            share = subsector_weights[s] / sum_sw
             initial_capital[r][s] = reg_total_cap * share
             
             base_tfp = 1.0
@@ -269,14 +411,15 @@ def generate_baseline_data():
             elif r in ['Donetsk', 'Luhansk', 'Kherson', 'Crimea', 'Sevastopol']:
                 base_tfp = 0.4
                 
-            sector_tfp_mult = {
+            parent = SUB_SECTORS[s]
+            parent_tfp_mult = {
                 'Agriculture': 0.18, 'ConsumerGoods': 0.14, 'Metallurgy': 0.15, 'Energy': 0.22,
                 'IT': 0.45, 'Machinery': 0.16, 'MilitaryIndustrial': 0.20, 'Construction': 0.12,
                 'Transport': 0.16, 'Retail': 0.14, 'Finance': 0.25, 'Healthcare': 0.10,
                 'PublicAdmin': 0.08, 'Chemicals': 0.15, 'Tourism': 0.12
-            }
+            }.get(parent, 0.15)
             
-            initial_tfp[r][s] = base_tfp * sector_tfp_mult[s] * 18000.0
+            initial_tfp[r][s] = base_tfp * parent_tfp_mult * 18000.0
             
             if r in ['Donetsk', 'Luhansk', 'Kharkiv', 'Kherson', 'Zaporizhzhia']:
                 energy_utilization[r][s] = 0.65
@@ -289,29 +432,46 @@ def generate_baseline_data():
     
     # 4. Target demand
     target_final_demand = {}
-    for r in REGIONS:
-        reg_weight = reg_grp_weights.get(r, 0.01) / total_grp_weight
-        reg_total_demand_uah = 5.2e12 * reg_weight
-        
-        sector_demand_weights = {
-            'Agriculture': 0.08, 'ConsumerGoods': 0.25, 'Metallurgy': 0.05, 'Energy': 0.06,
-            'IT': 0.08, 'Machinery': 0.05, 'MilitaryIndustrial': 0.08, 'Construction': 0.08,
-            'Transport': 0.06, 'Retail': 0.05, 'Finance': 0.04, 'Healthcare': 0.05,
-            'PublicAdmin': 0.04, 'Chemicals': 0.02, 'Tourism': 0.01
-        }
-        
-        for s in SECTORS:
-            share = sector_demand_weights[s]
-            target_final_demand[(r, s)] = reg_total_demand_uah * share
-
-    # 5. ABM / CGE Parameters
-    budget_shares = {
+    parent_demand_weights = {
         'Agriculture': 0.08, 'ConsumerGoods': 0.25, 'Metallurgy': 0.05, 'Energy': 0.06,
         'IT': 0.08, 'Machinery': 0.05, 'MilitaryIndustrial': 0.08, 'Construction': 0.08,
         'Transport': 0.06, 'Retail': 0.05, 'Finance': 0.04, 'Healthcare': 0.05,
         'PublicAdmin': 0.04, 'Chemicals': 0.02, 'Tourism': 0.01
     }
     
+    for r in REGIONS:
+        reg_weight = reg_grp_weights.get(r, 0.01) / total_grp_weight
+        reg_total_demand_uah = 5.2e12 * reg_weight
+        
+        # Distribute parent demand weights to sub-sectors
+        subsector_demand_weights = {}
+        for s in SECTORS:
+            p = SUB_SECTORS[s]
+            p_dw = parent_demand_weights.get(p, 0.05)
+            sub_w = SUPPLY_WEIGHTS.get(s, 1.0)
+            siblings = [sib for sib, parent in SUB_SECTORS.items() if parent == p]
+            tot_sib_w = sum(SUPPLY_WEIGHTS.get(sib, 1.0) for sib in siblings)
+            norm_sub_w = sub_w / (tot_sib_w if tot_sib_w > 0 else 1.0)
+            
+            subsector_demand_weights[s] = p_dw * norm_sub_w
+            
+        sum_sdw = sum(subsector_demand_weights.values())
+        
+        for s in SECTORS:
+            share = subsector_demand_weights[s] / sum_sdw
+            target_final_demand[(r, s)] = reg_total_demand_uah * share
+
+    # 5. ABM / CGE Parameters
+    budget_shares = {}
+    for s in SECTORS:
+        p = SUB_SECTORS[s]
+        p_dw = parent_demand_weights.get(p, 0.05)
+        sub_w = SUPPLY_WEIGHTS.get(s, 1.0)
+        siblings = [sib for sib, parent in SUB_SECTORS.items() if parent == p]
+        tot_sib_w = sum(SUPPLY_WEIGHTS.get(sib, 1.0) for sib in siblings)
+        norm_sub_w = sub_w / (tot_sib_w if tot_sib_w > 0 else 1.0)
+        budget_shares[s] = p_dw * norm_sub_w
+        
     sum_bs = sum(budget_shares.values())
     budget_shares = {k: v / sum_bs for k, v in budget_shares.items()}
     
