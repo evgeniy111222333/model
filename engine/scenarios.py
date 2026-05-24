@@ -89,6 +89,17 @@ class ScenarioEngine:
             # Energy grid recovery
             modifiers['energy_recovery'] = 0.04
             
+        # Populate region-specific TFP growth rates
+        tfp_growth_by_region = {}
+        for r in self.regions:
+            if r in ['Donetsk', 'Luhansk', 'Crimea', 'Sevastopol']:
+                tfp_growth_by_region[r] = 0.0 # Occupied
+            elif r in ['Kharkiv', 'Zaporizhzhia', 'Kherson', 'Mykolaiv']:
+                tfp_growth_by_region[r] = -0.05 # Frontline
+            else:
+                tfp_growth_by_region[r] = modifiers['tfp_growth']
+        modifiers['tfp_growth_by_region'] = tfp_growth_by_region
+            
         return modifiers
 
     def generate_lhs_samples(self, num_trials):
@@ -166,6 +177,18 @@ class ScenarioEngine:
         
         # Apply TFP modifier
         mods['tfp_growth'] += (lhs_sample['tfp_shock'] - 1.0) * 0.1
+        
+        # Apply stochastic TFP growth by region
+        tfp_growth_by_region = {}
+        for r in self.regions:
+            state = mods.get('frontline_states', {}).get(r, 0)
+            if state == 0:
+                tfp_growth_by_region[r] = mods['tfp_growth']
+            elif state == 1:
+                tfp_growth_by_region[r] = -0.05 + (lhs_sample['tfp_shock'] - 1.0) * 0.05
+            else: # state == 2
+                tfp_growth_by_region[r] = 0.0
+        mods['tfp_growth_by_region'] = tfp_growth_by_region
         
         # Apply foreign aid multiplier
         mods['foreign_aid_usd'] *= lhs_sample['aid_multiplier']

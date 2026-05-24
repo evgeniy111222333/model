@@ -98,5 +98,14 @@ class TestUkrEcoSim(unittest.TestCase):
             self.assertGreater(snap['inflation'], 0.0)
             self.assertGreater(snap['debt_gdp'], 0.0)
 
+    def test_mrio_solver_93_sectors(self):
+        """
+        Tests that MRIOSolver correctly initializes with 93 sectors and has size 2511x2511.
+        """
+        from engine.mrio import MRIOSolver
+        mrio = MRIOSolver(self.runner.regions, self.runner.sectors, self.base_data['base_tech_coefficients'], distances=self.runner.distances)
+        self.assertEqual(mrio.N, 27 * 93)
+        self.assertEqual(mrio.A.shape, (2511, 2511))
+
 if __name__ == "__main__":
     unittest.main()

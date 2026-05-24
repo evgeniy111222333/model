@@ -367,16 +367,10 @@ class ModelRunner:
                 for s in self.sectors:
                     self.abm.firms[r][s].capital = self.capital[r][s]
             
-            # TFP growth step: region-specific tfp growth based on frontline status
+            # TFP growth step: region-specific tfp growth based on scenarios and frontline status
+            tfp_growth_by_region = mods.get('tfp_growth_by_region', {})
             for r in self.regions:
-                state = self.frontline_states[r]
-                if state == 0:
-                    growth_rate = mods.get('tfp_growth', 0.018)
-                elif state == 1:
-                    growth_rate = -0.05
-                else: # state == 2
-                    growth_rate = 0.0
-                    
+                growth_rate = tfp_growth_by_region.get(r, mods.get('tfp_growth', 0.018))
                 for s in self.sectors:
                     self.tfp[r][s] *= (1.0 + growth_rate)
 
@@ -407,6 +401,7 @@ class ModelRunner:
                     'wage_skilled': self.wages_by_type[r]['skilled'],
                     'wage_unskilled': self.wages_by_type[r]['unskilled'],
                     'frontline_state': int(self.frontline_states[r]),
+                    'tfp_average': float(sum(self.tfp[r].values()) / len(self.tfp[r])),
                     'sectors': {s: {
                         'output': realized_output[(r, s)],
                         'capital': self.capital[r][s],

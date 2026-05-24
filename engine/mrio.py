@@ -22,8 +22,12 @@ class MRIOSolver:
         self.N = self.R * self.S
         
         self.base_tech = base_tech_coefficients
-        self.distances = distances
         
+        if distances is not None:
+            self.distances = distances
+        else:
+            self.distances = self._init_distances()
+            
         # Build index mapping
         self.node_to_idx = {}
         self.idx_to_node = []
@@ -36,6 +40,22 @@ class MRIOSolver:
                 
         # Initialize the global A matrix (N x N)
         self.A = self._build_initial_A()
+
+    def _init_distances(self):
+        if self.R == 27:
+            try:
+                from data.loader import calculate_geographic_distances
+                return calculate_geographic_distances()
+            except Exception:
+                pass
+        dist = np.zeros((self.R, self.R))
+        for i in range(self.R):
+            for j in range(self.R):
+                if i == j:
+                    dist[i, j] = 1.0
+                else:
+                    dist[i, j] = 100.0 + abs(i - j) * 35.0
+        return dist
 
     def _build_initial_A(self):
         """
@@ -53,7 +73,7 @@ class MRIOSolver:
                 if i == j:
                     trade_gravity[i, j] = 1.0 # High self-consumption (home bias)
                 else:
-                    dist = self.distances[i, j] if self.distances is not None else (100.0 + abs(i - j) * 35.0)
+                    dist = self.distances[i, j]
                     trade_gravity[i, j] = 0.2 / (1.0 + dist * 0.001) # Distance decay
                     
         # Normalize trade rows (how each region sources its inputs for a given sector)

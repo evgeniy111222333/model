@@ -114,6 +114,12 @@ class DemographicEngine:
         return pop_18
 
     def _init_distance_matrix(self):
+        if self.R == 27:
+            try:
+                from data.loader import calculate_geographic_distances
+                return calculate_geographic_distances()
+            except Exception:
+                pass
         dist = np.zeros((self.R, self.R))
         for i in range(self.R):
             for j in range(self.R):

@@ -120,8 +120,19 @@ class CGESolver:
 
         self.realized_imports = {}
         self.realized_exports = {}
+        
+        self.interest_rate = 0.15
+        self.p_world_import = np.ones(self.S)
+        self.p_world_export = np.ones(self.S)
 
     def _init_distances(self):
+        if self.R == 27:
+            try:
+                from data.loader import calculate_geographic_distances
+                self.distances = calculate_geographic_distances()
+                return
+            except Exception:
+                pass
         self.distances = np.zeros((self.R, self.R))
         for i in range(self.R):
             for j in range(self.R):
@@ -160,7 +171,13 @@ class CGESolver:
                 
         self.calibrated = True
 
-    def evaluate_cge_algebra(self, prices, w_unskilled, w_semiskilled, w_skilled, capital_mat, labor_supply_mat, tfp_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0, interest_rate=0.15, p_world_import=None, p_world_export=None):
+    def evaluate_cge_algebra(self, prices, w_unskilled, w_semiskilled, w_skilled, capital_mat, labor_supply_mat, tfp_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None):
+        if interest_rate is None:
+            interest_rate = self.interest_rate
+        if p_world_import is None:
+            p_world_import = self.p_world_import
+        if p_world_export is None:
+            p_world_export = self.p_world_export
         """
         Evaluates core non-linear CGE equations: value added nesting, factor demands, trade flow clearance.
         """
@@ -285,7 +302,14 @@ class CGESolver:
         
         return excess, y_val, imports, exports
 
-    def evaluate_cge_equations(self, multipliers, capital_mat, labor_supply_mat, tfp_mat, prices_base_mat, wages_base_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0, interest_rate=0.15, p_world_import=None, p_world_export=None):
+    def evaluate_cge_equations(self, multipliers, capital_mat, labor_supply_mat, tfp_mat, prices_base_mat, wages_base_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None):
+        if interest_rate is None:
+            interest_rate = self.interest_rate
+        if p_world_import is None:
+            p_world_import = self.p_world_import
+        if p_world_export is None:
+            p_world_export = self.p_world_export
+            
         mult_clip = np.clip(multipliers, 1e-3, 1e9)
         prices_mult = mult_clip[0:self.N].reshape((self.R, self.S))
         wages_skilled_mult = mult_clip[self.N:self.N+self.R]
@@ -314,7 +338,22 @@ class CGESolver:
         )
         return excess
 
-    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=0.15, p_world_import=None, p_world_export=None):
+    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None):
+        if interest_rate is not None:
+            self.interest_rate = interest_rate
+        else:
+            interest_rate = self.interest_rate
+            
+        if p_world_import is not None:
+            self.p_world_import = p_world_import
+        else:
+            p_world_import = self.p_world_import
+            
+        if p_world_export is not None:
+            self.p_world_export = p_world_export
+        else:
+            p_world_export = self.p_world_export
+            
         """
         Solves for the prices and wages that clear all CGE markets.
         Uses Powell hybrid method for small systems and fast tatonnement iterations for large systems.
