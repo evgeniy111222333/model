@@ -276,6 +276,9 @@ class FinanceEngine:
             
         er_pct_change = np.clip(er_pct_change, -0.15, 0.60)
         self.exchange_rate *= (1.0 + er_pct_change)
+        # PPP-based floor: UAH should never be cheaper than 30 UAH/USD (Ukraine's long-term range)
+        # This prevents the model from "appreciating" to unrealistic levels
+        self.exchange_rate = np.clip(self.exchange_rate, 30.0, 120.0)
         
         # Money supply growth (M2) includes base money growth + bank credit expansion
         prev_money_supply = self.money_supply
@@ -294,7 +297,8 @@ class FinanceEngine:
             theta_er * max(0.0, er_pct_change) -
             0.20 * (self.interest_rate - self.inflation_rate)
         )
-        self.inflation_rate = max(0.01, self.inflation_rate + d_inflation)
+        # Remove hard 1% floor - allow deflation if conditions warrant
+        self.inflation_rate = max(-0.05, self.inflation_rate + d_inflation)
         
         # NBU Taylor policy rule (interest rate response to inflation deviations)
         neutral_rate = 0.05

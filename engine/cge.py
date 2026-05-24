@@ -601,6 +601,11 @@ class CGESolver:
                 wages_solved_mat[:, 1] *= (1.0 + gamma_w * np.clip(excess_semiskilled / np.clip(labor_supply_mat[:, 1], 1.0, None), -0.2, 0.2))
                 wages_solved_mat[:, 0] *= (1.0 + gamma_w * np.clip(excess_unskilled / np.clip(labor_supply_mat[:, 0], 1.0, None), -0.2, 0.2))
                 wages_solved_mat = np.clip(wages_solved_mat, 1e2, 1e7)
+                # CLIP WAGE MULTIPLIERS to prevent divergence
+                # Each multiplier should stay within [0.5, 3.0] to prevent explosive wage changes
+                wages_solved_mat = np.clip(wages_solved_mat, 
+                                           wages_base_mat * 0.5,
+                                           wages_base_mat * 3.0)
                 
             wu_solved = wages_solved_mat[:, 0]
             wm_solved = wages_solved_mat[:, 1]

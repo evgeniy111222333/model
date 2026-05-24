@@ -349,8 +349,9 @@ class ModelRunner:
             annual_imports      = {(r, s): 0.0 for r in self.regions for s in self.sectors}
             annual_exports      = {(r, s): 0.0 for r in self.regions for s in self.sectors}
             
-            # Track quarterly solved prices for annual average (corrects price evolution bias)
+            # Track quarterly solved prices AND wages for annual average
             annual_price_solved = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
+            annual_wages_solved = {r: {lt: 0.0 for lt in ['unskilled', 'semi-skilled', 'skilled']} for r in self.regions}
             
             for q_idx, q_label in enumerate(quarter_labels):
                 q_mods = copy.deepcopy(mods)
@@ -414,17 +415,17 @@ class ModelRunner:
                 
                 # Update running prices gradually (tatonnement over quarters)
                 blend = 0.25
+                # Track wages per quarter for annual average (not running EMA)
                 for r in self.regions:
                     for s in self.sectors:
                         self.prices[r][s] = (1.0 - blend) * self.prices[r][s] + blend * q_prices_solved[r][s]
-                    for l_type in ['unskilled', 'semi-skilled', 'skilled']:
-                        if l_type in q_wages_solved[r]:
-                            self.wages_by_type[r][l_type] = (1.0 - blend) * self.wages_by_type[r].get(l_type, 0.0) + blend * q_wages_solved[r][l_type]
+                    # Don't update wages here - we'll average them at year end to prevent drift
                 
                 # Accumulate annual totals
                 for r in self.regions:
                     for l_type in ['unskilled', 'semi-skilled', 'skilled']:
                         annual_labor_supply[r][l_type] += q_labor[r].get(l_type, 0.0) * 0.25
+                        annual_wages_solved[r][l_type] += q_wages_solved[r].get(l_type, 0.0) * 0.25
                     for s in self.sectors:
                         annual_consumption[r][s] += q_consumption[r].get(s, 0.0) * 0.25
                 for r in self.regions:
@@ -443,8 +444,9 @@ class ModelRunner:
             self.cge.realized_exports = annual_exports
             
 # 8. Financial aggregates (annual sums)
-            # Use average quarterly prices for annual nominal GDP (corrects price evolution bias)
+            # Use average quarterly prices AND wages for annual calculations
             annual_avg_prices = {r: {s: annual_price_solved[r][s] for s in self.sectors} for r in self.regions}
+            annual_avg_wages = annual_wages_solved
             
             total_wages = 0.0
             regional_grp_nominal = {r: 0.0 for r in self.regions}
@@ -454,9 +456,10 @@ class ModelRunner:
                 state = self.frontline_states[r]
                 if state == 2:
                     continue
-                ws = self.wages_by_type[r]['skilled']
-                wm = self.wages_by_type[r].get('semi-skilled', ws * 0.70)
-                wu = self.wages_by_type[r]['unskilled']
+                # Use average quarterly wages for this year
+                ws = annual_avg_wages[r]['skilled']
+                wm = annual_avg_wages[r].get('semi-skilled', ws * 0.70)
+                wu = annual_avg_wages[r]['unskilled']
                 ls = labor_supply[r]['skilled']
                 lm = labor_supply[r].get('semi-skilled', ls * 0.70)
                 lu = labor_supply[r]['unskilled']
@@ -561,6 +564,15 @@ class ModelRunner:
                 growth_rate = tfp_growth_by_region.get(r, mods.get('tfp_growth', 0.018))
                 for s in self.sectors:
                     self.tfp[r][s] *= (1.0 + growth_rate)
+            
+            # Update wages by type using EMA dampening (same as prices)
+            # This prevents quarterly drift from accumulating into explosive annual wages
+            wage_blend = 0.25  # Same blend factor as prices
+            for r in self.regions:
+                for lt in ['unskilled', 'semi-skilled', 'skilled']:
+                    prev_wage = self.wages_by_type[r].get(lt, 100000.0)
+                    avg_wage = annual_avg_wages[r].get(lt, prev_wage)
+                    self.wages_by_type[r][lt] = (1.0 - wage_blend) * prev_wage + wage_blend * avg_wage
             
             # Update adaptive expectations with actual outcomes
             actual_inflation = fin_results.get('inflation_rate', 0.0)
