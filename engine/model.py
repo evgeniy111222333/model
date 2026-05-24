@@ -74,46 +74,83 @@ class ModelRunner:
     def _update_frontline_states(self, scenario_name, year):
         """
         Applies dynamic geopolitical trajectories to frontline states based on scenario and year.
+        STOCHASTIC FRONTIER: transition events have probability-based timing with uncertainty.
         """
+        import numpy as np
+        
+        # Stochastic transition probability (0.8 = 80% chance per year near target year)
+        stochastic_prob = 0.80
+        
         if scenario_name == 'optimistic':
-            # Rapid liberation
-            if year == 2028:
-                self.frontline_states['Mykolaiv'] = 0
-                self.frontline_states['Kherson'] = 0
-            elif year == 2030:
-                self.frontline_states['Kharkiv'] = 0
-                self.frontline_states['Zaporizhzhia'] = 0
-            elif year == 2032:
+            # Rapid liberation with stochastic timing
+            if year >= 2027 and np.random.rand() < stochastic_prob:
+                if self.frontline_states.get('Mykolaiv', 0) > 0:
+                    self.frontline_states['Mykolaiv'] = max(0, self.frontline_states['Mykolaiv'] - 1)
+                if self.frontline_states.get('Kherson', 0) > 0:
+                    self.frontline_states['Kherson'] = max(0, self.frontline_states['Kherson'] - 1)
+            
+            if year >= 2029 and np.random.rand() < stochastic_prob:
+                if self.frontline_states.get('Kharkiv', 0) > 0:
+                    self.frontline_states['Kharkiv'] = max(0, self.frontline_states['Kharkiv'] - 1)
+                if self.frontline_states.get('Zaporizhzhia', 0) > 0:
+                    self.frontline_states['Zaporizhzhia'] = max(0, self.frontline_states['Zaporizhzhia'] - 1)
+            
+            if year >= 2031 and np.random.rand() < stochastic_prob:
                 # Contested transitions (Occupied -> Frontline combat)
-                self.frontline_states['Donetsk'] = 1
-                self.frontline_states['Luhansk'] = 1
-            elif year == 2035:
+                if self.frontline_states.get('Donetsk', 2) == 2 and np.random.rand() < 0.5:
+                    self.frontline_states['Donetsk'] = 1
+                if self.frontline_states.get('Luhansk', 2) == 2 and np.random.rand() < 0.5:
+                    self.frontline_states['Luhansk'] = 1
+            
+            if year >= 2034 and np.random.rand() < stochastic_prob:
                 # Fully liberated
-                self.frontline_states['Donetsk'] = 0
-                self.frontline_states['Luhansk'] = 0
-            elif year == 2038:
-                self.frontline_states['Crimea'] = 1
-                self.frontline_states['Sevastopol'] = 1
-            elif year == 2042:
-                self.frontline_states['Crimea'] = 0
-                self.frontline_states['Sevastopol'] = 0
+                if self.frontline_states.get('Donetsk', 0) > 0:
+                    self.frontline_states['Donetsk'] = max(0, self.frontline_states['Donetsk'] - 1)
+                if self.frontline_states.get('Luhansk', 0) > 0:
+                    self.frontline_states['Luhansk'] = max(0, self.frontline_states['Luhansk'] - 1)
+            
+            if year >= 2037 and np.random.rand() < stochastic_prob:
+                if self.frontline_states.get('Crimea', 2) == 2:
+                    self.frontline_states['Crimea'] = 1
+                if self.frontline_states.get('Sevastopol', 2) == 2:
+                    self.frontline_states['Sevastopol'] = 1
+            
+            if year >= 2041 and np.random.rand() < stochastic_prob:
+                if self.frontline_states.get('Crimea', 0) > 0:
+                    self.frontline_states['Crimea'] = max(0, self.frontline_states['Crimea'] - 1)
+                if self.frontline_states.get('Sevastopol', 0) > 0:
+                    self.frontline_states['Sevastopol'] = max(0, self.frontline_states['Sevastopol'] - 1)
+                    
         elif scenario_name == 'pessimistic':
-            # Prolonged war of attrition, border flare-ups
-            if 2028 <= year <= 2035:
-                self.frontline_states['Sumy'] = 1
-                self.frontline_states['Chernihiv'] = 1
+            # Prolonged war of attrition, stochastic border flare-ups
+            if 2027 <= year <= 2036:
+                # Random fluctuations in border regions
+                flareup_prob = 0.15  # 15% chance per year of flare-up
+                for r in ['Sumy', 'Chernihiv']:
+                    current_state = self.frontline_states.get(r, 0)
+                    if np.random.rand() < flareup_prob:
+                        self.frontline_states[r] = 1 if current_state == 0 else current_state
+                    elif np.random.rand() < flareup_prob * 0.5:
+                        self.frontline_states[r] = 0 if current_state == 1 else current_state
             else:
                 self.frontline_states['Sumy'] = 0
                 self.frontline_states['Chernihiv'] = 0
+                
         else: # baseline
-            # Stalemate followed by slow long-term stabilization
-            if year == 2030:
-                self.frontline_states['Mykolaiv'] = 0
-            elif year == 2032:
-                self.frontline_states['Kherson'] = 0
-            elif year == 2040:
-                self.frontline_states['Kharkiv'] = 0
-                self.frontline_states['Zaporizhzhia'] = 0
+            # Stalemate followed by slow long-term stabilization with stochastic timing
+            if year >= 2029 and np.random.rand() < stochastic_prob:
+                if self.frontline_states.get('Mykolaiv', 0) > 0:
+                    self.frontline_states['Mykolaiv'] = max(0, self.frontline_states['Mykolaiv'] - 1)
+            
+            if year >= 2031 and np.random.rand() < stochastic_prob:
+                if self.frontline_states.get('Kherson', 0) > 0:
+                    self.frontline_states['Kherson'] = max(0, self.frontline_states['Kherson'] - 1)
+            
+            if year >= 2039 and np.random.rand() < stochastic_prob:
+                if self.frontline_states.get('Kharkiv', 0) > 0:
+                    self.frontline_states['Kharkiv'] = max(0, self.frontline_states['Kharkiv'] - 1)
+                if self.frontline_states.get('Zaporizhzhia', 0) > 0:
+                    self.frontline_states['Zaporizhzhia'] = max(0, self.frontline_states['Zaporizhzhia'] - 1)
 
     # Seasonal demand multipliers [Winter, Spring, Summer, Autumn]
     SEASONAL_FACTORS = {
@@ -284,6 +321,9 @@ class ModelRunner:
             annual_imports      = {(r, s): 0.0 for r in self.regions for s in self.sectors}
             annual_exports      = {(r, s): 0.0 for r in self.regions for s in self.sectors}
             
+            # Track quarterly solved prices for annual average (corrects price evolution bias)
+            annual_price_solved = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
+            
             for q_idx, q_label in enumerate(quarter_labels):
                 q_mods = copy.deepcopy(mods)
                 q_mods['is_quarterly'] = True
@@ -360,6 +400,8 @@ class ModelRunner:
                         annual_output[(r, s)] += q_output.get((r, s), 0.0) * 0.25
                         annual_imports[(r, s)] += self.cge.realized_imports.get((r, s), 0.0) * 0.25
                         annual_exports[(r, s)] += self.cge.realized_exports.get((r, s), 0.0) * 0.25
+                        # Accumulate solved prices (average later for annual GDP calculation)
+                        annual_price_solved[r][s] += q_prices_solved[r][s] * 0.25
             
             # Sync final quarter prices / wages back
             realized_output = annual_output
@@ -368,7 +410,10 @@ class ModelRunner:
             self.cge.realized_imports = annual_imports
             self.cge.realized_exports = annual_exports
             
-            # 8. Financial aggregates (annual sums)
+# 8. Financial aggregates (annual sums)
+            # Use average quarterly prices for annual nominal GDP (corrects price evolution bias)
+            annual_avg_prices = {r: {s: annual_price_solved[r][s] for s in self.sectors} for r in self.regions}
+            
             total_wages = 0.0
             total_profits = 0.0
             regional_grp_nominal = {r: 0.0 for r in self.regions}
@@ -388,23 +433,31 @@ class ModelRunner:
                 total_wages += lab_cost
                 
                 r_dest_idx = self.regions.index(r)
-                for s in self.sectors:
-                    out_val_nominal = realized_output[(r, s)] * self.prices[r][s]
+                for s_idx, s in enumerate(self.sectors):
+                    # Use AVERAGE quarterly price for annual nominal output
+                    out_qty = annual_output[(r, s)]
+                    out_val_nominal = out_qty * annual_avg_prices[r][s]
+                    
+                    # Intermediate cost: use technology coefficients B_mat with local prices
+                    # DO NOT use trade_shares - inter-regional trade is already embedded in CGE output
                     int_cost_nominal = 0.0
                     for sx_idx, sx in enumerate(self.sectors):
                         coeff = self.base_tech.get(s, {}).get(sx, 0.0)
                         if coeff > 0:
-                            qty_needed = realized_output[(r, s)] * coeff
-                            for rj in range(self.R):
-                                share = self.cge.trade_shares[rj, r_dest_idx, sx_idx]
-                                p_source = self.prices[self.regions[rj]][sx]
-                                int_cost_nominal += share * qty_needed * p_source
-                    profit = max(0.0, out_val_nominal - int_cost_nominal)
-                    total_profits += profit
-                    regional_grp_nominal[r] += out_val_nominal - int_cost_nominal
-                    out_val_real = realized_output[(r, s)]
-                    int_cost_real = sum(realized_output[(r, s)] * self.base_tech.get(s, {}).get(sx, 0.0) for sx in self.sectors)
-                    regional_grp_real[r] += out_val_real - int_cost_real
+                            # Get quantity of input needed
+                            qty_needed = out_qty * coeff
+                            # Use LOCAL source region price (no trade share distortion)
+                            int_cost_nominal += qty_needed * annual_avg_prices[r][sx]
+                    
+                    # GRP = sum of sectoral gross value added (output - intermediate costs)
+                    # This IS the regionalGRP - not double-counting, not summing output
+                    grp_sector = out_val_nominal - int_cost_nominal
+                    # Ensure GRP is non-negative (production function guarantees this if correct)
+                    regional_grp_nominal[r] += max(0.0, grp_sector)
+                    out_val_real = out_qty
+                    int_cost_real = sum(out_qty * self.base_tech.get(s, {}).get(sx, 0.0) for sx in self.sectors)
+                    grp_real_sector = out_val_real - int_cost_real
+                    regional_grp_real[r] += max(0.0, grp_real_sector)
             
             real_gdp_uah = sum(regional_grp_real.values())
             nominal_gdp_uah = sum(regional_grp_nominal.values())

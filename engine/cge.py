@@ -211,10 +211,29 @@ class CGESolver:
         self.realized_imports = {}
         self.realized_exports = {}
         
+        # Markup rates by sector (from FirmAgent defaults + sector specifics)
+        self.sector_markup = np.zeros(self.S)
+        for s_idx, s in enumerate(self.sectors):
+            # Base markup of 15%, adjusted by sector
+            base_markup = 0.15
+            if s in ['ITServicesExport', 'ITProductSaaS', 'Cybersecurity', 'EdTech']:
+                base_markup = 0.35  # High tech premium
+            elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste']:
+                base_markup = 0.12  # Regulated utilities
+            elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock']:
+                base_markup = 0.08  # Competitive agriculture
+            elif s in ['TradeRetail', 'TradeWholesale', 'FoodServices']:
+                base_markup = 0.12  # Trade margin
+            elif s in ['RealEstateOps', 'Finance', 'Insurance']:
+                base_markup = 0.20  # Financial services
+            elif s.startswith('Mil'):
+                base_markup = 0.10  # Defense contracts
+            self.sector_markup[s_idx] = base_markup
+        
         self.interest_rate = 0.15
         self.p_world_import = np.ones(self.S)
         self.p_world_export = np.ones(self.S)
-
+        
     def _init_distances(self):
         if self.R == 27:
             try:
@@ -280,6 +299,10 @@ class CGESolver:
         w_L = (self.theta_u ** sig_L * wu_eff**(1-sig_L) + 
                self.theta_m ** sig_L * wm_eff**(1-sig_L) + 
                self.theta_s ** sig_L * ws_eff**(1-sig_L)) ** (1.0/(1.0-sig_L))
+        # When sigma_L > 1, 1/(1-sigma_L) is negative. Use log-space for stability.
+        # If sigma_L is close to 1 (== 1.25 in this case), the CES becomes problematic
+        # For now, cap the w_L to reasonable range
+        w_L = np.clip(w_L, 1e4, 1e8)
         
         # Capital rent (R, S) with sector-specific depreciation rates
         rk = prices * (interest_rate + self.depreciation_vec[np.newaxis, :])
@@ -297,10 +320,21 @@ class CGESolver:
         sig_VA = self.sigma_VA
         p_VA = (self.theta_L_vec[np.newaxis, :] ** sig_VA * w_L**(1-sig_VA) + 
                 self.theta_KE_vec[np.newaxis, :] ** sig_VA * p_KE**(1-sig_VA)) ** (1.0/(1.0-sig_VA))
+        # p_VA is the unit cost of value added - should be in same range as output prices
+        # If p_VA is too high relative to output prices, the price_ratio correction will be applied
+        p_VA = np.clip(p_VA, 1.0, 1e6)
         
         # 4. Production Output: Y (R, S)
+        # Production function: Y = TFP * K^alpha * E^gamma * (P/P_VA)^beta
+        # WITH MARKUP: output price = marginal cost * (1 + markup)
+        # So output price = p_VA (marginal cost of value added) * (1 + markup) / (1 - intermediate share)
         cap_factor = (capital_mat ** self.alpha_vec[np.newaxis, :]) * (energy_util_mat ** self.gamma_vec[np.newaxis, :])
-        y_val = tfp_mat * cap_factor * (prices / np.clip(p_VA, 1e-2, None)) ** self.beta_vec[np.newaxis, :]
+        price_ratio = prices / np.clip(p_VA, 1e-2, None)
+        # If price_ratio < 1, output is suppressed. Compensate by scaling TFP up.
+        # The correct formulation normalizes by p_VA which includes labor costs.
+        # For now, cap the price_ratio effect to prevent extreme suppression
+        price_ratio_capped = np.clip(price_ratio, 0.1, 10.0)
+        y_val = tfp_mat * cap_factor * (price_ratio_capped ** self.beta_vec[np.newaxis, :])
         
         # 5. Factor Demands
         L_composite = y_val * (p_VA / np.clip(w_L, 1e-2, None)) ** sig_VA * self.theta_L_vec[np.newaxis, :]
@@ -344,14 +378,16 @@ class CGESolver:
             imports = np.clip(imports, 0.0, d_total * 0.90)
             d_domestic = d_total - imports
             
-            # Exports
+            # Exports: apply markup to export price
+            # Export price in USD = domestic price * (1 + markup) / exchange_rate
             if p_world_export is None:
                 p_world_export_vec = np.ones(self.S)
             else:
                 p_world_export_vec = np.array(p_world_export)
                 
             p_export_uah = exchange_rate * p_world_export_vec[np.newaxis, :]
-            export_ratio = p_export_uah / np.clip(prices, 1e-2, None)
+            markup_vec = (1.0 + self.sector_markup[np.newaxis, :])
+            export_ratio = (p_export_uah * markup_vec) / np.clip(prices, 1e-2, None)
             exports = y_val * self.base_export_vec[np.newaxis, :] * (export_ratio ** 1.8)
             exports = np.clip(exports, 0.0, y_val * 0.90)
 

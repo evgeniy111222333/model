@@ -382,9 +382,13 @@ class ABMEngine:
             is_worker = (cohort_sub >= 3) & (cohort_sub <= 12) & (health_sub == 0)
             
             # Remittances channel: emigrants from this region send money back
-            r_emigrants = np.sum((self.agent_region == r_idx) & (self.agent_health == 3))
-            remittance_annual = 150000.0
-            total_remittances_r = r_emigrants * (remittance_annual / 4.0 if is_q else remittance_annual)
+            # Track emigrants via agent_region == -1 (displaced/abroad)
+            # In our model, refugees pool is tracked at model level
+            # Here we estimate emigrants based on region population loss vs baseline
+            # For simplicity, use fixed remittance rate per worker
+            remittance_rate = scenario_modifiers.get('remittance_rate_per_worker', 0.10)
+            workers_in_region = np.sum(is_worker)
+            total_remittances_r = workers_in_region * remittance_rate * (w_unskilled + w_skilled) / 100.0
             remittances_per_worker = 0.0
             if total_remittances_r > 0:
                 num_workers = np.sum(is_worker)
@@ -419,13 +423,21 @@ class ABMEngine:
             
             w_draw_rate = 0.15 / 4.0 if is_q else 0.15
             wealth_draw = wealth_sub * w_draw_rate
-            liquidity = income + wealth_draw
+            
+            # REAL ESTATE WEALTH EFFECT: housing wealth affects consumption
+            # Estimate real estate wealth as 3x annual income for working-age, 1.5x for elderly
+            real_estate_mult = np.where(cohort_sub <= 12, 3.0, 1.5)
+            housing_wealth = real_estate_mult * wages_r[labor_sub] * (1.0 + 0.5 * (cohort_sub > 12))
+            # Wealth effect: 0.03 of housing wealth adds to liquidity (housing wealth channel)
+            housing_wealth_effect = housing_wealth * 0.03 / 4.0 if is_q else housing_wealth * 0.03
+            
+            liquidity = income + wealth_draw + housing_wealth_effect
             
             prices_r = np.array([prices[r][s] for s in self.sectors])
             subsist_vals = np.array([subsistence_demands[r][s] for s in self.sectors])
             subsist_cost = np.sum(subsist_vals * prices_r)
             
-            super_income = np.clip(liquidity - subsist_cost, 0.0, None)
+            super_income = np.clip(liquidity - housing_wealth_effect - subsist_cost, 0.0, None)
             
             sufficient_mask = liquidity >= subsist_cost
             w_penalty_rate = 0.05 / 4.0 if is_q else 0.05
@@ -470,7 +482,7 @@ class ABMEngine:
                 avail_males = np.sum(r_mask & l_mask & active_working & males) * (1.0 - mobilization_rate)
                 avail_females = np.sum(r_mask & l_mask & active_working & females)
                 
-                supply_val = (avail_males + avail_females) * labor_participation * real_people_per_agent
+                supply_val = (avail_males + avail_females) * labor_participation
                 labor_supply[r][l_type] = max(100.0, supply_val)
                 
         return labor_supply, aggregate_consumption
@@ -479,9 +491,13 @@ class ABMEngine:
         """
         Decentralized Firm Agent capital update and investment planning.
         Firms invest corporate profits based on MPK vs interest rates, and expand capital.
+        CREDIT→PRODUCTION LINKAGE: Available bank loans constrain investment capacity.
         """
         interest_rate = scenario_modifiers.get('interest_rate', 0.15)
         war_damage = scenario_modifiers.get('war_damage', {})
+        
+        # Credit-to-production linkage: available bank loans constrain investment capacity
+        available_credit_uah = scenario_modifiers.get('available_credit_uah', 0.5e12)
         
         fdi_uah = scenario_modifiers.get('fdi_usd', 1.5e9) * scenario_modifiers.get('exchange_rate', 40.0)
         aid_uah = scenario_modifiers.get('foreign_aid_usd', 22.0e9) * (1.0 - scenario_modifiers.get('foreign_aid_grant_share', 0.50)) * scenario_modifiers.get('exchange_rate', 40.0)
@@ -489,7 +505,11 @@ class ABMEngine:
         # Calculate national output sums per sector for share distribution
         total_sector_output = {s: sum(realized_output.get((rj, s), 0.0) for rj in self.regions) for s in self.sectors}
         
+        # Total credit available for productive investment (after banking system overhead)
+        total_credit_pool = available_credit_uah * 0.70  # 70% goes to productive sector
+        
         capital_next = {}
+        total_investment = 0.0
         for r in self.regions:
             capital_next[r] = {}
             state = scenario_modifiers.get('frontline_states', {}).get(r, 0)
@@ -510,7 +530,29 @@ class ABMEngine:
                 depreciation = self.depreciation_vec[s_idx]
                 # Dynamic investment planning
                 mpk = out_val / max(1e-5, firm.capital)
-                inv = firm.plan_investment(firm_profit, interest_rate, mpk, depreciation, war_damage.get(r, {}).get(s, 0.0))
+                
+                # Credit-constrained investment: firms can borrow up to their collateral
+                # Collateral proxy = firm capital value (at 60% LTV)
+                collateral_value = firm.capital * 0.60
+                max_credit_firm = collateral_value * (1.0 + 0.5 * (mpk - interest_rate))
+                max_credit_firm = min(max_credit_firm, available_credit_uah * out_share * 2.0)  # credit allocation by sector
+                
+                # Investment from own profits + borrowed credit
+                reinvest_share = 0.15
+                if mpk > interest_rate:
+                    reinvest_share += 0.10
+                else:
+                    reinvest_share -= 0.05
+                
+                inv_from_profit = max(0.0, firm_profit * np.clip(reinvest_share - 0.5 * interest_rate, 0.05, 0.30))
+                
+                # Credit-constrained total investment
+                inv_from_credit = min(max_credit_firm, inv_from_profit * 0.5)  # can borrow up to 50% of own investment
+                total_inv = inv_from_profit + inv_from_credit
+                
+                total_investment += total_inv
+                
+                firm.capital = max(1e-3, firm.capital * (1.0 - depreciation) + total_inv)
                 
                 # Receive share of FDI and Aid
                 fdi_share = out_share * (fdi_uah / len(self.regions))
@@ -522,4 +564,7 @@ class ABMEngine:
                     firm.capital = max(1e-3, firm.capital * (1.0 - 0.15))
                     
                 capital_next[r][s] = firm.capital
+                
+        # Credit channel effect: print for debugging (can be logged in production)
+        # print(f"Credit→Production: total_credit_pool={total_credit_pool:.2e}, total_investment={total_investment:.2e}")
         return capital_next

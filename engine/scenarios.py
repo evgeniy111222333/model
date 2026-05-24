@@ -27,6 +27,7 @@ class ScenarioEngine:
             modifiers['labor_participation'] = 0.72 + 0.03 * t
             modifiers['brain_drain_rate'] = max(0.001, 0.008 * (1.0 - t * 3.0))
             modifiers['fertility_modifier'] = 1.0 + 0.25 * t # Post-war baby boom
+            modifiers['remittance_rate_per_worker'] = 0.05  # Low remittances (most return home)
             
             # TFP growth (high)
             modifiers['tfp_growth'] = 0.035
@@ -50,6 +51,7 @@ class ScenarioEngine:
             modifiers['labor_participation'] = 0.65
             modifiers['brain_drain_rate'] = 0.01 # Steady loss of young talent
             modifiers['fertility_modifier'] = 0.85
+            modifiers['remittance_rate_per_worker'] = 0.15  # High remittances (emigrants stay)
             
             # TFP growth (stagnant)
             modifiers['tfp_growth'] = 0.005
@@ -73,6 +75,7 @@ class ScenarioEngine:
             modifiers['labor_participation'] = 0.69 + 0.02 * t
             modifiers['brain_drain_rate'] = max(0.003, 0.006 * (1.0 - t * 2.0))
             modifiers['fertility_modifier'] = 1.0 + 0.10 * t
+            modifiers['remittance_rate_per_worker'] = 0.10  # Moderate remittances
             
             # TFP growth (moderate)
             modifiers['tfp_growth'] = 0.018
