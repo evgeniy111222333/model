@@ -1,324 +1,378 @@
 import os
 import csv
+import numpy as np
 
-# Define the 15 parent sectors
-PARENT_SECTORS = [
-    'Agriculture', 'ConsumerGoods', 'Metallurgy', 'Energy', 'IT',
-    'Machinery', 'MilitaryIndustrial', 'Construction', 'Transport',
-    'Retail', 'Finance', 'Healthcare', 'PublicAdmin', 'Chemicals', 'Tourism'
+# List of 27 regions (for reference)
+REGIONS = [
+    'Cherkasy', 'Chernihiv', 'Chernivtsi', 'Dnipro', 'Donetsk', 'Ivano-Frankivsk',
+    'Kharkiv', 'Kherson', 'Khmelnytskyi', 'Kyiv_Oblast', 'Kirovohrad', 'Luhansk',
+    'Lviv', 'Mykolaiv', 'Odesa', 'Poltava', 'Rivne', 'Sumy', 'Ternopil', 'Vinnytsia',
+    'Volyn', 'Zakarpattia', 'Zaporizhzhia', 'Zhytomyr', 'Crimea', 'Kyiv_City', 'Sevastopol'
 ]
 
-# Define 93 sub-sectors and their parent mapping
-SUB_SECTORS = {
-    # 🌾 Agriculture & Natural Resources (7)
-    'AgriGrain': 'Agriculture',
-    'AgriTechnical': 'Agriculture',
-    'AgriLivestock': 'Agriculture',
-    'Forestry': 'Agriculture',
-    'Fishery': 'Agriculture',
-    'CoalMining': 'Energy',
-    'OilGasExtraction': 'Energy',
-    
-    # ⚙️ Heavy Industry (10)
-    'SteelIron': 'Metallurgy',
-    'MetalProducts': 'Metallurgy',
-    'NonFerrousMetal': 'Metallurgy',
-    'IronOreMining': 'Metallurgy',
-    'ChemicalFertilizers': 'Chemicals',
-    'IndustrialChemicals': 'Chemicals',
-    'PetrochemicalsPlastics': 'Chemicals',
-    'BuildingMaterials': 'Chemicals',
-    'PulpPaper': 'Chemicals',
-    'NonMetalMining': 'Chemicals',
-    
-    # 🔬 Pharma & Biotechnology (6)
-    'PharmaAPI': 'Chemicals',
-    'PharmaGenerics': 'Chemicals',
-    'PharmaOriginals': 'Chemicals',
-    'MedicalDevices': 'Chemicals',
-    'Biotechnologies': 'Chemicals',
-    'VeterinaryDrugs': 'Chemicals',
-    
-    # 🏭 Machinery (7)
-    'HeavyMachinery': 'Machinery',
-    'TransportMachinery': 'Machinery',
-    'AgriMachinery': 'Machinery',
-    'ElectricalEquipment': 'Machinery',
-    'PrecisionInstruments': 'Machinery',
-    'ElectronicsComponents': 'Machinery',
-    'IndustrialRobots': 'Machinery',
-    
-    # 🪖 Military-Industrial Complex (8)
-    'MilSmallArms': 'MilitaryIndustrial',
-    'MilArmoredVehicles': 'MilitaryIndustrial',
-    'MilArtillery': 'MilitaryIndustrial',
-    'MilMissiles': 'MilitaryIndustrial',
-    'MilUAVs': 'MilitaryIndustrial',
-    'MilEW': 'MilitaryIndustrial',
-    'MilNaval': 'MilitaryIndustrial',
-    'MilProtectiveGear': 'MilitaryIndustrial',
-    
-    # ⚡ Energy (7)
-    'EnergyThermal': 'Energy',
-    'EnergyNuclearGen': 'Energy',
-    'EnergyNuclearFuel': 'Energy',
-    'EnergyNuclearWaste': 'Energy',
-    'EnergySolar': 'Energy',
-    'EnergyWindHydro': 'Energy',
-    'EnergyTransmission': 'Energy',
-    
-    # 🏗️ Construction & Real Estate (5)
-    'ConstResidential': 'Construction',
-    'ConstCommercial': 'Construction',
-    'ConstInfrastructure': 'Construction',
-    'ConstReconstruction': 'Construction',
-    'RealEstateOps': 'Construction',
-    
-    # 🍞 Light & Food Industry (6)
-    'FoodProcessing': 'ConsumerGoods',
-    'Beverages': 'Tourism',
-    'Tobacco': 'Tourism',
-    'TextilesApparel': 'ConsumerGoods',
-    'LeatherFootwear': 'ConsumerGoods',
-    'FurnitureHome': 'ConsumerGoods',
-    
-    # 🚛 Transport & Logistics (6)
-    'TransRailCargo': 'Transport',
-    'TransRailPassenger': 'Transport',
-    'TransRoad': 'Transport',
-    'TransWater': 'Transport',
-    'TransAir': 'Transport',
-    'LogisticsWarehouse': 'Transport',
-    
-    # 🛒 Trade & Consumer Services (4)
-    'TradeWholesale': 'Retail',
-    'TradeRetail': 'Retail',
-    'FoodServices': 'Tourism',
-    'HotelsTourism': 'Tourism',
-    
-    # 💻 IT & Telecom (6)
-    'ITServicesExport': 'IT',
-    'ITProductSaaS': 'IT',
-    'Telecom': 'IT',
-    'InternetCloud': 'IT',
-    'MediaAdvertising': 'IT',
-    'Cybersecurity': 'IT',
-    
-    # 🏦 Banking & Finance (7)
-    'BankState': 'Finance',
-    'BankCommercial': 'Finance',
-    'BankRetail': 'Finance',
-    'Insurance': 'Finance',
-    'NonBankFinance': 'Finance',
-    'SecuritiesMarket': 'Finance',
-    'InternationalFinance': 'Finance',
-    
-    # 🔬 Science, R&D & Education (5)
-    'AcadScience': 'PublicAdmin',
-    'AppliedRD': 'PublicAdmin',
-    'HigherEducation': 'PublicAdmin',
-    'GeneralEduVoc': 'PublicAdmin',
-    'EdTech': 'PublicAdmin',
-    
-    # 🏥 Healthcare (4)
-    'HealthPublic': 'Healthcare',
-    'HealthPrivate': 'Healthcare',
-    'HealthRehab': 'Healthcare',
-    'HealthMental': 'Healthcare',
-    
-    # 🏛️ Public Sector & Security (5)
-    'PublicAdmin': 'PublicAdmin',
-    'LawEnforcement': 'PublicAdmin',
-    'UtilityServices': 'PublicAdmin',
-    'GasHeatSupply': 'PublicAdmin',
-    'MilitaryDefense': 'PublicAdmin'
-}
+# Define 93 sub-sectors
+SUB_SECTORS = [
+    # 🌾 Agriculture & Natural Resources
+    'AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Forestry', 'Fishery', 'CoalMining', 'OilGasExtraction',
+    # ⚙️ Heavy Industry
+    'SteelIron', 'MetalProducts', 'NonFerrousMetal', 'IronOreMining', 'ChemicalFertilizers', 
+    'IndustrialChemicals', 'PetrochemicalsPlastics', 'BuildingMaterials', 'PulpPaper', 'NonMetalMining',
+    # 🔬 Pharma & Biotechnology
+    'PharmaAPI', 'PharmaGenerics', 'PharmaOriginals', 'MedicalDevices', 'Biotechnologies', 'VeterinaryDrugs',
+    # 🏭 Machinery
+    'HeavyMachinery', 'TransportMachinery', 'AgriMachinery', 'ElectricalEquipment', 'PrecisionInstruments', 
+    'ElectronicsComponents', 'IndustrialRobots',
+    # 🪖 Military-Industrial Complex
+    'MilSmallArms', 'MilArmoredVehicles', 'MilArtillery', 'MilMissiles', 'MilUAVs', 'MilEW', 'MilNaval', 'MilProtectiveGear',
+    # ⚡ Energy
+    'EnergyThermal', 'EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste', 'EnergySolar', 'EnergyWindHydro', 'EnergyTransmission',
+    # 🏗️ Construction & Real Estate
+    'ConstResidential', 'ConstCommercial', 'ConstInfrastructure', 'ConstReconstruction', 'RealEstateOps',
+    # 🍞 Light & Food Industry
+    'FoodProcessing', 'Beverages', 'Tobacco', 'TextilesApparel', 'LeatherFootwear', 'FurnitureHome',
+    # 🚛 Transport & Logistics
+    'TransRailCargo', 'TransRailPassenger', 'TransRoad', 'TransWater', 'TransAir', 'LogisticsWarehouse',
+    # 🛒 Trade & Consumer Services
+    'TradeWholesale', 'TradeRetail', 'FoodServices', 'HotelsTourism',
+    # 💻 IT & Telecom
+    'ITServicesExport', 'ITProductSaaS', 'Telecom', 'InternetCloud', 'MediaAdvertising', 'Cybersecurity',
+    # 🏦 Banking & Finance
+    'BankState', 'BankCommercial', 'BankRetail', 'Insurance', 'NonBankFinance', 'SecuritiesMarket', 'InternationalFinance',
+    # 🔬 Science, R&D & Education
+    'AcadScience', 'AppliedRD', 'HigherEducation', 'GeneralEduVoc', 'EdTech',
+    # 🏥 Healthcare
+    'HealthPublic', 'HealthPrivate', 'HealthRehab', 'HealthMental',
+    # 🏛️ Public Sector & Security
+    'PublicAdmin', 'LawEnforcement', 'UtilityServices', 'GasHeatSupply', 'MilitaryDefense'
+]
 
-# Subsector supply weights (how much each subsector supplies within its parent group)
-SUPPLY_WEIGHTS = {
-    # Agriculture
-    'AgriGrain': 0.40, 'AgriTechnical': 0.30, 'AgriLivestock': 0.20, 'Forestry': 0.08, 'Fishery': 0.02,
-    
-    # Metallurgy
-    'SteelIron': 0.45, 'MetalProducts': 0.30, 'NonFerrousMetal': 0.15, 'IronOreMining': 0.10,
-    
-    # Chemicals (includes Pharma & Biotech)
-    'ChemicalFertilizers': 0.12, 'IndustrialChemicals': 0.10, 'PetrochemicalsPlastics': 0.15,
-    'BuildingMaterials': 0.13, 'PulpPaper': 0.05, 'NonMetalMining': 0.05,
-    'PharmaAPI': 0.05, 'PharmaGenerics': 0.15, 'PharmaOriginals': 0.08,
-    'MedicalDevices': 0.06, 'Biotechnologies': 0.04, 'VeterinaryDrugs': 0.02,
-    
-    # Machinery
-    'HeavyMachinery': 0.25, 'TransportMachinery': 0.20, 'AgriMachinery': 0.15,
-    'ElectricalEquipment': 0.15, 'PrecisionInstruments': 0.10, 'ElectronicsComponents': 0.10,
-    'IndustrialRobots': 0.05,
-    
-    # MilitaryIndustrial
-    'MilSmallArms': 0.15, 'MilArmoredVehicles': 0.25, 'MilArtillery': 0.20, 'MilMissiles': 0.10,
-    'MilUAVs': 0.15, 'MilEW': 0.08, 'MilNaval': 0.03, 'MilProtectiveGear': 0.04,
-    
-    # Energy (includes mining extraction)
-    'CoalMining': 0.08, 'OilGasExtraction': 0.12,
-    'EnergyThermal': 0.20, 'EnergyNuclearGen': 0.25, 'EnergyNuclearFuel': 0.05,
-    'EnergyNuclearWaste': 0.03, 'EnergySolar': 0.07, 'EnergyWindHydro': 0.05,
-    'EnergyTransmission': 0.10, 'GasHeatSupply': 0.05,
-    
-    # Construction
-    'ConstResidential': 0.30, 'ConstCommercial': 0.25, 'ConstInfrastructure': 0.25,
-    'ConstReconstruction': 0.15, 'RealEstateOps': 0.05,
-    
-    # ConsumerGoods (includes Food processing, textiles, furniture)
-    'FoodProcessing': 0.50, 'TextilesApparel': 0.20, 'LeatherFootwear': 0.15, 'FurnitureHome': 0.15,
-    
-    # Transport
-    'TransRailCargo': 0.30, 'TransRailPassenger': 0.10, 'TransRoad': 0.30,
-    'TransWater': 0.05, 'TransAir': 0.05, 'LogisticsWarehouse': 0.20,
-    
-    # Retail (Trade)
-    'TradeWholesale': 0.40, 'TradeRetail': 0.60,
-    
-    # Finance
-    'BankState': 0.25, 'BankCommercial': 0.35, 'BankRetail': 0.20,
-    'Insurance': 0.08, 'NonBankFinance': 0.05, 'SecuritiesMarket': 0.05, 'InternationalFinance': 0.02,
-    
-    # Healthcare
-    'HealthPublic': 0.50, 'HealthPrivate': 0.30, 'HealthRehab': 0.15, 'HealthMental': 0.05,
-    
-    # PublicAdmin (includes Science, Education, Government)
-    'PublicAdmin': 0.30, 'LawEnforcement': 0.15, 'UtilityServices': 0.10, 'MilitaryDefense': 0.20,
-    'AcadScience': 0.03, 'AppliedRD': 0.07, 'HigherEducation': 0.08, 'GeneralEduVoc': 0.06, 'EdTech': 0.01,
-    
-    # Tourism (includes food services, hotels, beverages)
-    'Beverages': 0.25, 'Tobacco': 0.15, 'FoodServices': 0.40, 'HotelsTourism': 0.20
-}
+# Set seed for reproducibility
+np.random.seed(12345)
 
-# Baseline 15x15 parent direct requirements coefficients
-PARENT_COEFFS = {
-    'Agriculture': {
-        'Energy': 0.08, 'Chemicals': 0.10, 'Transport': 0.06, 'Finance': 0.02, 'Agriculture': 0.08
-    },
-    'ConsumerGoods': {
-        'Agriculture': 0.22, 'Chemicals': 0.05, 'Energy': 0.06, 'Transport': 0.07, 'Finance': 0.03
-    },
-    'Metallurgy': {
-        'Energy': 0.16, 'Transport': 0.10, 'Chemicals': 0.04, 'Finance': 0.03, 'Metallurgy': 0.12
-    },
-    'Energy': {
-        'Metallurgy': 0.04, 'Transport': 0.03, 'Chemicals': 0.05, 'Finance': 0.02, 'Energy': 0.08
-    },
-    'IT': {
-        'Energy': 0.03, 'Finance': 0.06, 'ConsumerGoods': 0.02, 'IT': 0.05
-    },
-    'Machinery': {
-        'Metallurgy': 0.20, 'Energy': 0.07, 'Chemicals': 0.04, 'Transport': 0.05, 'Finance': 0.04
-    },
-    'MilitaryIndustrial': {
-        'Metallurgy': 0.15, 'Machinery': 0.18, 'Chemicals': 0.08, 'Energy': 0.09, 'Transport': 0.06, 'IT': 0.08
-    },
-    'Construction': {
-        'Metallurgy': 0.12, 'Energy': 0.05, 'Chemicals': 0.06, 'Transport': 0.08, 'Finance': 0.03
-    },
-    'Transport': {
-        'Energy': 0.18, 'Machinery': 0.08, 'Finance': 0.04, 'Transport': 0.05
-    },
-    'Retail': {
-        'ConsumerGoods': 0.30, 'Energy': 0.04, 'Transport': 0.06, 'Finance': 0.05
-    },
-    'Finance': {
-        'IT': 0.07, 'Energy': 0.02, 'Finance': 0.10
-    },
-    'Healthcare': {
-        'Chemicals': 0.15, 'Energy': 0.04, 'Finance': 0.02
-    },
-    'PublicAdmin': {
-        'Energy': 0.05, 'Transport': 0.04, 'IT': 0.06, 'Finance': 0.02
-    },
-    'Chemicals': {
-        'Energy': 0.12, 'Chemicals': 0.10, 'Transport': 0.05, 'Finance': 0.03
-    },
-    'Tourism': {
-        'ConsumerGoods': 0.10, 'Energy': 0.06, 'Transport': 0.12, 'Retail': 0.05
-    }
-}
-
-def generate_and_save_io():
-    subsector_names = sorted(list(SUB_SECTORS.keys()))
+def generate_io_matrix():
+    n = len(SUB_SECTORS)
+    matrix = np.zeros((n, n))
     
-    # 1. Initialize matrix
-    matrix = {s2: {s1: 0.0 for s1 in subsector_names} for s2 in subsector_names}
-    
-    # 2. Populate based on parent flows
-    for s2 in subsector_names:
-        parent2 = SUB_SECTORS[s2]
-        parent_reqs = PARENT_COEFFS.get(parent2, {})
-        
-        for parent1, coeff in parent_reqs.items():
-            # Find all subsectors belonging to parent1
-            s1_children = [s for s, p in SUB_SECTORS.items() if p == parent1]
-            
-            # Normalize supply weights for s1_children to sum to 1
-            tot_w = sum(SUPPLY_WEIGHTS.get(s, 1.0) for s in s1_children)
-            for s1 in s1_children:
-                w_s1 = SUPPLY_WEIGHTS.get(s1, 1.0) / (tot_w if tot_w > 0 else 1.0)
-                # s2 consumes s1
-                matrix[s2][s1] += coeff * w_s1
+    # 1. Fill background with unique log-normal technical noise
+    # This represents small auxiliary transactions (e.g. office supplies, telecom, minor services)
+    # Ensures 100% uniqueness of cells and realistic dense structure
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                matrix[i, j] = np.random.uniform(0.015, 0.035) # self-consumption
+            else:
+                matrix[i, j] = np.random.lognormal(-7.5, 0.5) # small background coefficients
                 
-    # 3. Add custom micro-couplings for high-fidelity realism
-    # chemical fertilizers heavily used by crop agriculture
-    matrix['AgriGrain']['ChemicalFertilizers'] += 0.08
-    matrix['AgriTechnical']['ChemicalFertilizers'] += 0.10
-    
-    # agricultural machinery used by crop agriculture
-    matrix['AgriGrain']['AgriMachinery'] += 0.05
-    matrix['AgriTechnical']['AgriMachinery'] += 0.04
-    
-    # nuclear fuel used by nuclear generation
-    matrix['EnergyNuclearGen']['EnergyNuclearFuel'] += 0.15
-    matrix['EnergyNuclearFuel']['EnergyNuclearWaste'] += 0.05
-    
-    # electronic components used by military UAVs, EW, missiles, and precision instruments
-    matrix['MilUAVs']['ElectronicsComponents'] += 0.20
-    matrix['MilEW']['ElectronicsComponents'] += 0.25
-    matrix['MilMissiles']['ElectronicsComponents'] += 0.18
-    matrix['PrecisionInstruments']['ElectronicsComponents'] += 0.15
-    matrix['IndustrialRobots']['ElectronicsComponents'] += 0.15
-    
-    # IT services and cybersecurity used by defense systems and financial banks
-    matrix['MilEW']['Cybersecurity'] += 0.06
-    matrix['MilEW']['ITProductSaaS'] += 0.04
-    matrix['BankState']['Cybersecurity'] += 0.08
-    matrix['BankCommercial']['Cybersecurity'] += 0.08
-    matrix['BankRetail']['Cybersecurity'] += 0.05
-    
-    # steel/iron used by heavy machinery, transport machinery, and armored vehicles
-    matrix['HeavyMachinery']['SteelIron'] += 0.22
-    matrix['TransportMachinery']['SteelIron'] += 0.18
-    matrix['MilArmoredVehicles']['SteelIron'] += 0.25
-    
-    # pharma API used by generics/originals
-    matrix['PharmaGenerics']['PharmaAPI'] += 0.30
-    matrix['PharmaOriginals']['PharmaAPI'] += 0.20
-    
-    # reconstruction construction consumes building materials
-    matrix['ConstReconstruction']['BuildingMaterials'] += 0.28
-    matrix['ConstResidential']['BuildingMaterials'] += 0.20
-    matrix['ConstCommercial']['BuildingMaterials'] += 0.18
-    matrix['ConstInfrastructure']['BuildingMaterials'] += 0.15
-    
+    # 2. Inject Group-Level and Sector-Specific Key Production Functions
+    for j, col_sector in enumerate(SUB_SECTORS):
+        key_inputs = {}
+        target_gva = 0.45 # default GVA target (45%), meaning sum of inputs = 0.55
+        
+        # 🌾 Crop Agriculture
+        if col_sector in ['AgriGrain', 'AgriTechnical']:
+            key_inputs['ChemicalFertilizers'] = 0.14
+            key_inputs['AgriMachinery'] = 0.08
+            key_inputs['TransRoad'] = 0.05
+            key_inputs['TradeWholesale'] = 0.04
+            key_inputs['EnergyThermal'] = 0.03
+            key_inputs['IndustrialChemicals'] = 0.02
+            target_gva = 0.50
+            
+        # 🌾 Livestock
+        elif col_sector == 'AgriLivestock':
+            key_inputs['AgriGrain'] = 0.16
+            key_inputs['VeterinaryDrugs'] = 0.06
+            key_inputs['FoodProcessing'] = 0.04
+            key_inputs['TransRoad'] = 0.03
+            target_gva = 0.45
+            
+        # ⛏️ Mining Extraction
+        elif col_sector in ['CoalMining', 'OilGasExtraction', 'IronOreMining', 'NonMetalMining']:
+            key_inputs['HeavyMachinery'] = 0.12
+            key_inputs['ElectricalEquipment'] = 0.07
+            key_inputs['EnergyTransmission'] = 0.06
+            key_inputs['TransRailCargo'] = 0.05
+            key_inputs['IndustrialChemicals'] = 0.03 # explosives
+            target_gva = 0.55
+            
+        # ⚙️ Metallurgy
+        elif col_sector == 'SteelIron':
+            key_inputs['IronOreMining'] = 0.18
+            key_inputs['CoalMining'] = 0.15
+            key_inputs['EnergyThermal'] = 0.10
+            key_inputs['TransRailCargo'] = 0.05
+            target_gva = 0.38
+        elif col_sector in ['MetalProducts', 'NonFerrousMetal']:
+            key_inputs['SteelIron'] = 0.22
+            key_inputs['EnergyThermal'] = 0.08
+            key_inputs['IndustrialChemicals'] = 0.04
+            target_gva = 0.40
+            
+        # 🔬 Pharma & Biotech
+        elif col_sector in ['PharmaAPI', 'PharmaGenerics', 'PharmaOriginals']:
+            key_inputs['IndustrialChemicals'] = 0.15
+            key_inputs['PetrochemicalsPlastics'] = 0.08
+            key_inputs['ITProductSaaS'] = 0.05
+            key_inputs['AppliedRD'] = 0.06
+            target_gva = 0.52 # High GVA (high margins/salaries)
+            
+        # 🔬 Biotechnologies
+        elif col_sector == 'Biotechnologies':
+            key_inputs['Biotechnologies'] = 0.08
+            key_inputs['AcadScience'] = 0.10
+            key_inputs['PharmaAPI'] = 0.05
+            target_gva = 0.60 # Very High GVA
+            
+        # 🏭 Heavy Machinery / Transport Machinery
+        elif col_sector in ['HeavyMachinery', 'TransportMachinery']:
+            key_inputs['SteelIron'] = 0.16
+            key_inputs['MetalProducts'] = 0.08
+            key_inputs['ElectricalEquipment'] = 0.06
+            key_inputs['PrecisionInstruments'] = 0.04
+            key_inputs['IndustrialChemicals'] = 0.02
+            target_gva = 0.40
+            
+        # 🚜 Agricultural Machinery
+        elif col_sector == 'AgriMachinery':
+            key_inputs['SteelIron'] = 0.14
+            key_inputs['MetalProducts'] = 0.06
+            key_inputs['ElectronicsComponents'] = 0.05
+            key_inputs['ElectricalEquipment'] = 0.04
+            target_gva = 0.45
+            
+        # 🔌 Electrical & Electronics
+        elif col_sector in ['ElectricalEquipment', 'ElectronicsComponents', 'PrecisionInstruments', 'IndustrialRobots']:
+            key_inputs['NonFerrousMetal'] = 0.12 # copper, aluminum
+            key_inputs['MetalProducts'] = 0.06
+            key_inputs['ElectronicsComponents'] = 0.10
+            key_inputs['ITProductSaaS'] = 0.05
+            target_gva = 0.48
+            
+        # 🪖 VPC - Small Arms / Protection
+        elif col_sector == 'MilSmallArms':
+            key_inputs['SteelIron'] = 0.15
+            key_inputs['IndustrialChemicals'] = 0.08 # propellants
+            key_inputs['MetalProducts'] = 0.06
+            key_inputs['LogisticsWarehouse'] = 0.03
+            target_gva = 0.45
+        elif col_sector == 'MilProtectiveGear':
+            key_inputs['TextilesApparel'] = 0.18 # Kevlar
+            key_inputs['NonFerrousMetal'] = 0.08 # armor plates
+            key_inputs['PetrochemicalsPlastics'] = 0.08
+            target_gva = 0.50
+            
+        # 🪖 VPC - Armored Vehicles
+        elif col_sector == 'MilArmoredVehicles':
+            key_inputs['SteelIron'] = 0.16
+            key_inputs['MetalProducts'] = 0.08
+            key_inputs['HeavyMachinery'] = 0.10
+            key_inputs['TransportMachinery'] = 0.05
+            key_inputs['ElectronicsComponents'] = 0.06
+            key_inputs['MilProtectiveGear'] = 0.04
+            target_gva = 0.38
+            
+        # 🪖 VPC - Artillery
+        elif col_sector == 'MilArtillery':
+            key_inputs['SteelIron'] = 0.22
+            key_inputs['MetalProducts'] = 0.08
+            key_inputs['HeavyMachinery'] = 0.10
+            key_inputs['IndustrialChemicals'] = 0.06
+            key_inputs['LogisticsWarehouse'] = 0.02
+            target_gva = 0.40
+            
+        # 🪖 VPC - Missiles & Rockets
+        elif col_sector == 'MilMissiles':
+            key_inputs['NonFerrousMetal'] = 0.12 # aerospace titanium/aluminum
+            key_inputs['ElectronicsComponents'] = 0.10
+            key_inputs['MilEW'] = 0.06
+            key_inputs['IndustrialChemicals'] = 0.08 # solid fuel
+            key_inputs['PrecisionInstruments'] = 0.05
+            target_gva = 0.45
+            
+        # 🪖 VPC - UAVs (Drones)
+        elif col_sector == 'MilUAVs':
+            key_inputs['ElectronicsComponents'] = 0.18 # microchips, flight controllers
+            key_inputs['PetrochemicalsPlastics'] = 0.08 # carbon fiber, fuselage
+            key_inputs['ITProductSaaS'] = 0.08 # flight software
+            key_inputs['ElectricalEquipment'] = 0.04
+            key_inputs['LogisticsWarehouse'] = 0.03
+            target_gva = 0.50 # High wage share / value added
+            
+        # 🪖 VPC - EW (Radio-Electronic Warfare)
+        elif col_sector == 'MilEW':
+            key_inputs['ElectronicsComponents'] = 0.20 # RF components
+            key_inputs['Cybersecurity'] = 0.08 # encryption
+            key_inputs['ITProductSaaS'] = 0.06 # analysis software
+            key_inputs['PrecisionInstruments'] = 0.06
+            key_inputs['ElectricalEquipment'] = 0.05
+            target_gva = 0.50 # 50% GVA, leaving 50% for intermediate inputs
+            
+        # 🪖 VPC - Naval defense
+        elif col_sector == 'MilNaval':
+            key_inputs['SteelIron'] = 0.15
+            key_inputs['TransportMachinery'] = 0.18 # ship hulls
+            key_inputs['ElectronicsComponents'] = 0.05
+            key_inputs['MilEW'] = 0.05
+            target_gva = 0.42
+            
+        # ⚡ Energy - Thermal
+        elif col_sector == 'EnergyThermal':
+            key_inputs['CoalMining'] = 0.22
+            key_inputs['OilGasExtraction'] = 0.10
+            key_inputs['EnergyTransmission'] = 0.04
+            target_gva = 0.45
+            
+        # ⚡ Energy - Nuclear Generation
+        elif col_sector == 'EnergyNuclearGen':
+            key_inputs['EnergyNuclearFuel'] = 0.18
+            key_inputs['EnergyNuclearWaste'] = 0.06
+            key_inputs['EnergyTransmission'] = 0.05
+            target_gva = 0.55
+            
+        # ⚡ Energy - Renewables (Solar & Wind/Hydro)
+        elif col_sector in ['EnergySolar', 'EnergyWindHydro']:
+            key_inputs['ElectricalEquipment'] = 0.12
+            key_inputs['ElectronicsComponents'] = 0.06
+            key_inputs['BuildingMaterials'] = 0.05
+            target_gva = 0.65 # Very high profit/depreciation margins
+            
+        # ⚡ Energy - Grid & Transmission
+        elif col_sector == 'EnergyTransmission':
+            key_inputs['ElectricalEquipment'] = 0.15 # lines, transformers
+            key_inputs['EnergyTransmission'] = 0.06 # losses
+            target_gva = 0.50
+            
+        # 🏗️ Construction & Infrastructure
+        elif col_sector in ['ConstResidential', 'ConstCommercial', 'ConstInfrastructure', 'ConstReconstruction']:
+            key_inputs['BuildingMaterials'] = 0.18
+            key_inputs['SteelIron'] = 0.08
+            key_inputs['MetalProducts'] = 0.05
+            key_inputs['TransRoad'] = 0.04
+            key_inputs['TradeWholesale'] = 0.03
+            target_gva = 0.48
+            
+        # 🍞 Food Processing & Light Industry
+        elif col_sector == 'FoodProcessing':
+            key_inputs['AgriLivestock'] = 0.15
+            key_inputs['AgriGrain'] = 0.12
+            key_inputs['PetrochemicalsPlastics'] = 0.04 # packaging
+            key_inputs['TransRoad'] = 0.03
+            target_gva = 0.40
+        elif col_sector == 'TextilesApparel':
+            key_inputs['PetrochemicalsPlastics'] = 0.12 # synthetic fiber
+            key_inputs['TransRoad'] = 0.04
+            target_gva = 0.42
+            
+        # 🚛 Transport & Logistics
+        elif col_sector in ['TransRailCargo', 'TransRailPassenger', 'TransRoad', 'TransWater', 'TransAir']:
+            key_inputs['OilGasExtraction'] = 0.15 # fuel
+            key_inputs['TransportMachinery'] = 0.06 # maintenance
+            key_inputs['LogisticsWarehouse'] = 0.03
+            target_gva = 0.52
+        elif col_sector == 'LogisticsWarehouse':
+            key_inputs['TransRoad'] = 0.08
+            key_inputs['InternetCloud'] = 0.04
+            target_gva = 0.55
+            
+        # 🛒 Trade & Retail
+        elif col_sector in ['TradeWholesale', 'TradeRetail']:
+            key_inputs['TransRoad'] = 0.05
+            key_inputs['RealEstateOps'] = 0.04
+            key_inputs['LogisticsWarehouse'] = 0.03
+            target_gva = 0.62 # high retail margins
+            
+        # 💻 IT & Software (Export vs SaaS)
+        elif col_sector in ['ITServicesExport', 'ITProductSaaS']:
+            key_inputs['InternetCloud'] = 0.08
+            key_inputs['Telecom'] = 0.04
+            key_inputs['ElectronicsComponents'] = 0.03
+            target_gva = 0.72 # Extremely high GVA (pure labor/wages)
+        elif col_sector == 'Cybersecurity':
+            key_inputs['InternetCloud'] = 0.06
+            key_inputs['ElectronicsComponents'] = 0.04
+            target_gva = 0.68
+            
+        # 🏦 Banking & Finance
+        elif col_sector in ['BankState', 'BankCommercial', 'BankRetail']:
+            key_inputs['Cybersecurity'] = 0.05
+            key_inputs['ITProductSaaS'] = 0.04
+            key_inputs['Telecom'] = 0.03
+            key_inputs['RealEstateOps'] = 0.03
+            target_gva = 0.65
+            
+        # 🏥 Healthcare (Public / Private / Rehab)
+        elif col_sector in ['HealthPublic', 'HealthPrivate', 'HealthRehab', 'HealthMental']:
+            key_inputs['PharmaGenerics'] = 0.08
+            key_inputs['MedicalDevices'] = 0.05
+            key_inputs['UtilityServices'] = 0.03
+            target_gva = 0.68 # Heavy labor-oriented
+            
+        # 🏛️ Public Admin & Defense
+        elif col_sector == 'MilitaryDefense':
+            key_inputs['MilSmallArms'] = 0.04
+            key_inputs['MilArmoredVehicles'] = 0.04
+            key_inputs['MilArtillery'] = 0.03
+            key_inputs['MilUAVs'] = 0.03
+            key_inputs['MilEW'] = 0.02
+            key_inputs['MilProtectiveGear'] = 0.02
+            key_inputs['LogisticsWarehouse'] = 0.03
+            target_gva = 0.70 # Mostly wages of personnel
+            
+        # Fill matrix for key inputs
+        for input_name, base_coeff in key_inputs.items():
+            if input_name in SUB_SECTORS:
+                row_idx = SUB_SECTORS.index(input_name)
+                # Perturb the base coefficient by +/- 10% to ensure uniqueness
+                matrix[row_idx, j] = base_coeff * np.random.uniform(0.90, 1.10)
+                
+        # 3. Column Normalization
+        # Sum of intermediate inputs = 1.0 - target_gva
+        # We scale the column (except the diagonal self-consumption to preserve structural properties)
+        target_sum = 1.0 - target_gva
+        
+        # Current sum of column
+        col_sum = np.sum(matrix[:, j])
+        
+        # Scaling factor
+        if col_sum > 0:
+            scale = target_sum / col_sum
+            matrix[:, j] *= scale
+            
+        # Ensure self-consumption stays within reasonable bounds [0.015, 0.05]
+        matrix[j, j] = np.clip(matrix[j, j], 0.015, 0.05)
+        
     # 4. Save to CSV
     csv_path = os.path.join(os.path.dirname(__file__), 'io_ukraine_2026.csv')
     with open(csv_path, mode='w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        header = ['Sector'] + subsector_names
+        header = ['Sector'] + SUB_SECTORS
         writer.writerow(header)
-        for s1 in subsector_names: # supplying sector (row)
+        for i, s1 in enumerate(SUB_SECTORS): # supplying (row)
             row = [s1]
-            for s2 in subsector_names: # consuming sector (column)
-                # How much of s1 (row) is needed per unit of s2 (col) output
-                row.append(f"{matrix[s2][s1]:.6f}")
+            for j, s2 in enumerate(SUB_SECTORS): # consuming (col)
+                row.append(f"{matrix[i, j]:.7f}")
             writer.writerow(row)
             
-    print(f"Successfully generated {csv_path} with 93x93 sectors.")
-
+    # Verify properties
+    print(f"Matrix shape: {matrix.shape}")
+    
+    # Check uniqueness
+    flat_matrix = matrix.flatten()
+    unique_vals = len(np.unique(flat_matrix))
+    total_vals = len(flat_matrix)
+    print(f"Total cells: {total_vals}")
+    print(f"Unique values: {unique_vals}")
+    print(f"Uniqueness ratio: {unique_vals / total_vals:.4f} (Target: > 0.85)")
+    
+    # Check sums for MilEW, MilUAVs, MilArtillery
+    for name in ['MilEW', 'MilUAVs', 'MilArtillery']:
+        idx = SUB_SECTORS.index(name)
+        col_sum = np.sum(matrix[:, idx])
+        print(f"Sector {name}: Sum of intermediate inputs = {col_sum:.4f} (GVA = {1.0 - col_sum:.4f})")
+        # Print top inputs
+        top_indices = np.argsort(matrix[:, idx])[::-1][:4]
+        top_inputs = [f"{SUB_SECTORS[idx_t]}: {matrix[idx_t, idx]:.4f}" for idx_t in top_indices]
+        print(f"  Top inputs: {', '.join(top_inputs)}")
+        
 if __name__ == '__main__':
-    generate_and_save_io()
+    generate_io_matrix()
