@@ -76,8 +76,6 @@ class ModelRunner:
         Applies dynamic geopolitical trajectories to frontline states based on scenario and year.
         STOCHASTIC FRONTIER: transition events have probability-based timing with uncertainty.
         """
-        import numpy as np
-        
         # Stochastic transition probability (0.8 = 80% chance per year near target year)
         stochastic_prob = 0.80
         
@@ -184,6 +182,7 @@ class ModelRunner:
         'flexible': 0.10, # Agriculture, food, retail, IT services
     }
     
+    @staticmethod
     def _get_calvo_theta(s):
         if s in ['EnergyThermal', 'EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste', 
                  'EnergyTransmission', 'GasHeatSupply', 'UtilityServices', 'GasHeatSupply',
@@ -222,7 +221,18 @@ class ModelRunner:
                 mods = scenario_engine.apply_stochastic_shocks(base_mods, lhs_sample)
             else:
                 mods = base_mods
+                # Deterministic mode: apply baseline war damage to frontier regions
+                # Frontline (state=1): 5% damage, Occupied (state=2): 20% damage
+                # This is separate from stochastic Monte Carlo which uses LHS samples
                 mods['war_damage'] = {}
+                for r in self.regions:
+                    state = self.frontline_states.get(r, 0)
+                    dmg_rate = 0.20 if state == 2 else (0.05 if state == 1 else 0.01)
+                    for s in self.sectors:
+                        # Energy and heavy industry more vulnerable
+                        sector_mult = 2.0 if s.startswith('Energy') or s.startswith('Steel') or s.startswith('Metal') else 1.0
+                        mods['war_damage'][r] = mods['war_damage'].get(r, {})
+                        mods['war_damage'][r][s] = dmg_rate * sector_mult
                 mods['export_shock'] = 1.0
                 
             self._update_frontline_states(scenario_name, year)
@@ -415,7 +425,6 @@ class ModelRunner:
             annual_avg_prices = {r: {s: annual_price_solved[r][s] for s in self.sectors} for r in self.regions}
             
             total_wages = 0.0
-            total_profits = 0.0
             regional_grp_nominal = {r: 0.0 for r in self.regions}
             regional_grp_real = {r: 0.0 for r in self.regions}
             
@@ -462,6 +471,22 @@ class ModelRunner:
             real_gdp_uah = sum(regional_grp_real.values())
             nominal_gdp_uah = sum(regional_grp_nominal.values())
             nominal_gdp_usd = nominal_gdp_uah / self.finance.exchange_rate
+            
+            # Compute total_profits from GRP: GRP = wages + capital_rent + profits
+            # So profits = GRP - wages - capital_rent
+            # Capital rent = sum over sectors (capital * (interest_rate + depreciation))
+            total_capital_cost = 0.0
+            for r in self.regions:
+                if self.frontline_states[r] == 2:
+                    continue
+                for s in self.sectors:
+                    cap = self.capital[r].get(s, 0.0)
+                    interest_rate = self.finance.interest_rate
+                    depreciation = 0.07  # average depreciation rate
+                    total_capital_cost += cap * (interest_rate + depreciation)
+            
+            # Profits as residual of GRP after factor payments
+            total_profits = max(0.0, nominal_gdp_uah - total_wages - total_capital_cost)
             
             total_exports_usd = sum(annual_exports.get((r, s), 0.0) for r in self.regions for s in self.sectors if self.frontline_states[r] != 2) / self.finance.exchange_rate
             total_imports_usd = sum(annual_imports.get((r, s), 0.0) for r in self.regions for s in self.sectors if self.frontline_states[r] != 2) / self.finance.exchange_rate
@@ -546,6 +571,7 @@ class ModelRunner:
                     'pop': sum(self.demographics.pop[r][g].sum() for g in ['Male', 'Female']),
                     'wage_skilled': self.wages_by_type[r]['skilled'],
                     'wage_unskilled': self.wages_by_type[r]['unskilled'],
+                    'wage_semi_skilled': self.wages_by_type[r].get('semi-skilled', (self.wages_by_type[r]['skilled'] + self.wages_by_type[r]['unskilled']) / 2.0),
                     'frontline_state': int(self.frontline_states[r]),
                     'tfp_average': float(sum(self.tfp[r].values()) / len(self.tfp[r])),
                     'sectors': {s: {

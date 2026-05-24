@@ -151,8 +151,6 @@ class DemographicEngine:
             # ----------------------------------------------------
             # MICRO AGENT-BASED VECTORIZED DEMOGRAPHICS
             # ----------------------------------------------------
-            N = abm.num_households
-            N = abm.num_households
             active_mask = abm.agent_health != 2  # Not deceased
             
             # 1. Increment Age & Education transitions
@@ -433,12 +431,13 @@ class DemographicEngine:
             returned_refugees = refugee_pool * repatriation_rate
             
             # Brain drain
+            total_brain_drain = 0.0
             for r_idx in range(self.R):
                 for g_idx in range(2):
                     # Loss of skilled working age population (approx cohort 3-12 active)
                     loss = new_pop[r_idx, 3:13, g_idx, 0] * brain_drain_rate
                     new_pop[r_idx, 3:13, g_idx, 0] -= loss
-                    total_deaths += np.sum(loss)
+                    total_brain_drain += np.sum(loss)
                     
                     # Returned refugees (distributed by GRP attraction)
                     region_share = attractions[r_idx] / np.sum(attractions)

@@ -224,8 +224,10 @@ class CGESolver:
                 base_markup = 0.08  # Competitive agriculture
             elif s in ['TradeRetail', 'TradeWholesale', 'FoodServices']:
                 base_markup = 0.12  # Trade margin
-            elif s in ['RealEstateOps', 'Finance', 'Insurance']:
+            elif s in ['RealEstateOps', 'BankState', 'BankCommercial', 'BankRetail', 'NonBankFinance', 'SecuritiesMarket', 'InternationalFinance']:
                 base_markup = 0.20  # Financial services
+            elif s == 'Insurance':
+                base_markup = 0.18  # Insurance margin
             elif s.startswith('Mil'):
                 base_markup = 0.10  # Defense contracts
             self.sector_markup[s_idx] = base_markup
@@ -290,19 +292,30 @@ class CGESolver:
         """
         Evaluates core non-linear CGE equations: value added nesting, factor demands, trade flow clearance.
         """
-        # 1. Labor cost index: w_L (R, S)
+        # 1. Labor cost index: w_L (R, S) using stable CES formulation
+        # For sigma_L = 1.25 (>1), use log-space to avoid numerical instability
         sig_L = self.sigma_L
-        wu_eff = w_unskilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
-        wm_eff = w_semiskilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
-        ws_eff = w_skilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
         
-        w_L = (self.theta_u ** sig_L * wu_eff**(1-sig_L) + 
-               self.theta_m ** sig_L * wm_eff**(1-sig_L) + 
-               self.theta_s ** sig_L * ws_eff**(1-sig_L)) ** (1.0/(1.0-sig_L))
-        # When sigma_L > 1, 1/(1-sigma_L) is negative. Use log-space for stability.
-        # If sigma_L is close to 1 (== 1.25 in this case), the CES becomes problematic
-        # For now, cap the w_L to reasonable range
-        w_L = np.clip(w_L, 1e4, 1e8)
+        if sig_L > 1.0:
+            # Use nested CES: first combine semi and unskilled, then skilled
+            # w_L = (theta_s * ws^rho + (theta_u*wu^rho + theta_m*wm^rho)^(rho/sigma_L))^(1/rho)
+            # where rho = (sigma_L - 1) / sigma_L is negative for sigma_L > 1
+            rho = (sig_L - 1.0) / sig_L  # negative when sig_L > 1
+            wu_p = wu_eff ** rho
+            wm_p = wm_eff ** rho
+            ws_p = ws_eff ** rho
+            
+            # First combine unskilled and semi-skilled
+            w_um = (self.theta_u * wu_p + self.theta_m * wm_p) ** (1.0 / rho)
+            # Then combine with skilled using outer weights
+            w_L_raw = (self.theta_s * ws_p + (1.0 - self.theta_s) * w_um ** rho) ** (1.0 / rho)
+        else:
+            # Standard CES for sigma_L <= 1
+            w_L_raw = (self.theta_u ** sig_L * wu_eff**(1-sig_L) + 
+                      self.theta_m ** sig_L * wm_eff**(1-sig_L) + 
+                      self.theta_s ** sig_L * ws_eff**(1-sig_L)) ** (1.0/(1.0-sig_L))
+        
+        w_L = np.clip(w_L_raw, 1e4, 1e8)
         
         # Capital rent (R, S) with sector-specific depreciation rates
         rk = prices * (interest_rate + self.depreciation_vec[np.newaxis, :])
@@ -508,9 +521,16 @@ class CGESolver:
             labor_supply_mat[r_idx, 1] = labor_supply_by_type[r].get('semi-skilled', labor_supply_by_type[r]['unskilled'] * 0.70)
             labor_supply_mat[r_idx, 2] = labor_supply_by_type[r]['skilled']
             
-            wages_base_mat[r_idx, 0] = labor_supply_by_type[r].get('unskilled_wage', 120000.0)
-            wages_base_mat[r_idx, 2] = labor_supply_by_type[r].get('skilled_wage', 300000.0)
-            wages_base_mat[r_idx, 1] = (wages_base_mat[r_idx, 0] + wages_base_mat[r_idx, 2]) / 2.0
+            # Get wages from scenario modifiers or use defaults from wages_by_type
+            # labor_supply_by_type contains keys 'unskilled', 'semi-skilled', 'skilled' (counts)
+            # We need actual wages - these should be passed or extracted from the model
+            # For now, use the wages_base_mat passed from the model runner's wages_by_type
+            # Note: this function receives wages_base_mat as parameter, so this block is for fallback
+            w_u = wages_base_mat[r_idx, 0] if r_idx < wages_base_mat.shape[0] else 120000.0
+            w_s = wages_base_mat[r_idx, 2] if r_idx < wages_base_mat.shape[0] else 300000.0
+            wages_base_mat[r_idx, 0] = w_u
+            wages_base_mat[r_idx, 2] = w_s
+            wages_base_mat[r_idx, 1] = (w_u + w_s) / 2.0
  
         if self.S <= 15:
             # ----------------------------------------------------
