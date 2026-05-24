@@ -470,8 +470,13 @@ class CGESolver:
         """
         Solves for the prices and wages that clear all CGE markets.
         Uses Powell hybrid method for small systems and fast tatonnement iterations for large systems.
+        Recalibrates trade shares periodically as EU integration changes home bias.
         """
-        if not self.calibrated:
+        # Recalibrate every 5 years or if not yet calibrated
+        recal_interval = 5
+        needs_recal = (not self.calibrated) or ((year - 2026) % recal_interval == 0)
+        
+        if needs_recal:
             self.calibrate_parameters(capital, labor_supply_by_type, tfp, household_demands,
                                       eu_integration_progress=eu_integration_progress, year=year)
             

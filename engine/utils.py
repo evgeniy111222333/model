@@ -100,7 +100,7 @@ def get_depreciation_rate(sector):
         return 0.03
     elif sector in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste']:
         return 0.025
-    elif sector.startswith('Mil') or sector in [
+    elif sector in [
         'HeavyMachinery', 'TransportMachinery', 'AgriMachinery', 'ElectricalEquipment',
         'PrecisionInstruments', 'ElectronicsComponents', 'IndustrialRobots'
     ]:
@@ -307,35 +307,33 @@ class AdaptiveExpectations:
     - Unskilled workers: lambda ~0.3 (slower to update)
     """
     
-    def __init__(self, lambda_skilled=0.60, lambda_unskilled=0.30, lambda_semi=0.45):
+    def __init__(self, lambda_skilled=0.60, lambda_unskilled=0.30, lambda_semi=0.45, initial_inflation=0.08):
         self.lambda_skilled = lambda_skilled
         self.lambda_semi = lambda_semi
         self.lambda_unskilled = lambda_unskilled
         
-        # Expectation states
-        self.expected_inflation = 0.0  # annual inflation rate expectation
-        self.expected_wage_growth = 0.0  # annual wage growth expectation
+        # Expectation states - initialized with realistic values (not zero)
+        self.expected_inflation = initial_inflation  # start at 8% realistic
+        self.expected_wage_growth = 0.0  # wage growth can start at 0
         self.expected_grp_growth = {}  # per region
     
     def update(self, actual_inflation, actual_wage_growth, actual_grp_growth_by_region, labor_type='unskilled'):
         """
         Update expectations based on actual observed values.
+        Uses separate adaptation speeds for each labor type.
         """
-        if labor_type == 'skilled':
-            lam = self.lambda_skilled
-        elif labor_type == 'semi-skilled':
-            lam = self.lambda_semi
-        else:
-            lam = self.lambda_unskilled
-        
-        # Adaptive update: new = lambda * actual + (1-lambda) * old
-        self.expected_inflation = lam * actual_inflation + (1.0 - lam) * self.expected_inflation
-        self.expected_wage_growth = lam * actual_wage_growth + (1.0 - lam) * self.expected_wage_growth
+        # Update all labor types with their respective lambda for realistic modeling
+        # This ensures skilled agents update faster than unskilled
+        for lt, lam in [('skilled', self.lambda_skilled), ('semi-skilled', self.lambda_semi), ('unskilled', self.lambda_unskilled)]:
+            self.expected_inflation = lam * actual_inflation + (1.0 - lam) * self.expected_inflation
+            self.expected_wage_growth = lam * actual_wage_growth + (1.0 - lam) * self.expected_wage_growth
         
         for r, grp_g in actual_grp_growth_by_region.items():
             if r not in self.expected_grp_growth:
                 self.expected_grp_growth[r] = 0.0
-            self.expected_grp_growth[r] = lam * grp_g + (1.0 - lam) * self.expected_grp_growth[r]
+            # Use average lambda for regional GRP expectations
+            avg_lam = (self.lambda_skilled + self.lambda_unskilled) / 2.0
+            self.expected_grp_growth[r] = avg_lam * grp_g + (1.0 - avg_lam) * self.expected_grp_growth[r]
     
     def get_expected_inflation(self):
         return self.expected_inflation
@@ -366,7 +364,7 @@ class HousingMarket:
     
     Uses a reduced-form approach:
     - Housing supply: H = H_prev * (1 + construction_rate - destruction)
-    - Housing demand: driven by population and income
+    - Housing demand: driven by population and income (normalized)
     - Price: P = P_prev * (demand/supply) * (1 + inflation_expectation)
     
     War effects:
@@ -378,13 +376,16 @@ class HousingMarket:
         self.regions = regions
         self.R = len(regions)
         
-        # Housing stock per region (number of housing units, simplified to UAH value)
-        self.housing_stock = {r: 1.0 for r in regions}  # normalized to 1.0
+        # Housing stock per region (normalized index, base = 1.0)
+        self.housing_stock = {r: 1.0 for r in regions}
         self.housing_prices = {r: 1.0 for r in regions}  # normalized price index
         
         # Construction and destruction parameters
         self.base_construction_rate = 0.02  # 2% annual new construction
-        self.destruction_rate = {r: 0.0 for r in regions}
+        
+        # Track reference values for normalization
+        self.ref_population = {}  # initial population per region
+        self.ref_income = {}  # initial income per capita
     
     def step(self, population, income_per_capita, war_damage_by_region, frontline_states, expected_inflation):
         """
@@ -397,6 +398,11 @@ class HousingMarket:
         
         for r in self.regions:
             state = frontline_states.get(r, 0)
+            
+            # Initialize reference values on first call
+            if r not in self.ref_population:
+                self.ref_population[r] = max(1.0, population.get(r, 1.0))
+                self.ref_income[r] = max(0.1, income_per_capita.get(r, 1.0))
             
             # Destruction from war
             war_dmg = war_damage_by_region.get(r, {})
@@ -420,16 +426,17 @@ class HousingMarket:
             self.housing_stock[r] *= (1.0 + construction - destruction)
             self.housing_stock[r] = max(0.1, self.housing_stock[r])
             
-            # Housing demand (driven by population and income)
-            pop_factor = population.get(r, 1.0)
-            income_factor = income_per_capita.get(r, 1.0)
-            demand = pop_factor * income_factor
+            # Housing demand: normalized to prevent explosive growth
+            # Use ratio to reference values to keep in reasonable range
+            pop_ratio = population.get(r, self.ref_population[r]) / self.ref_population[r]
+            income_ratio = income_per_capita.get(r, self.ref_income[r]) / self.ref_income[r]
+            demand_ratio = pop_ratio * income_ratio
             
-            # Price adjustment
-            demand_supply_ratio = demand / max(0.01, self.housing_stock[r])
-            price_change = demand_supply_ratio * (1.0 + expected_inflation)
-            self.housing_prices[r] *= price_change
-            self.housing_prices[r] = max(0.1, self.housing_prices[r])
+            # Price adjustment: gradual convergence to demand/supply balance
+            # Use log-scale to prevent explosive growth from large ratios
+            price_mult = 1.0 + np.log(max(0.1, demand_ratio)) * 0.1 + expected_inflation
+            self.housing_prices[r] *= price_mult
+            self.housing_prices[r] = np.clip(self.housing_prices[r], 0.1, 100.0)
             
             # Housing wealth (stock * price)
             housing_wealth = self.housing_stock[r] * self.housing_prices[r]

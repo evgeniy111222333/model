@@ -270,9 +270,9 @@ class ModelRunner:
             # 4. Energy Grid Constraints (annual + cascading topological failure)
             # Energy zone definitions: West/Center/East by GEOGRAPHIC location, not alphabetical
             energy_zone_damage = {'West': 0.0, 'Center': 0.0, 'East': 0.0}
-            for r_idx, r in enumerate(self.regions):
+            for r in self.regions:
                 state = self.frontline_states[r]
-                zone = get_energy_zone(r)  # Use geographic zone lookup
+                zone = get_energy_zone(r)
                 for s in self.sectors:
                     rec = mods.get('energy_recovery', 0.04)
                     dmg = mods['war_damage'].get(r, {}).get(s, 0.0)
@@ -283,10 +283,8 @@ class ModelRunner:
                     elif state == 2:
                         next_util = 0.0
                     self.energy_utilization[r][s] = next_util
-                if r_idx >= 16:
-                    energy_zone_damage['East'] += sum(mods['war_damage'].get(r, {}).values())
-                elif r_idx >= 6:
-                    energy_zone_damage['Center'] += sum(mods['war_damage'].get(r, {}).values())
+                # Accumulate zone damage by GEOGRAPHIC zone
+                energy_zone_damage[zone] += sum(mods['war_damage'].get(r, {}).values())
             
             # Energy zone tracking for cascade reporting
             zone_cascade = energy_zone_damage['East'] > 0.5
