@@ -4,6 +4,7 @@ class ScenarioEngine:
     """
     Manages deterministic scenarios (Optimistic, Baseline, Pessimistic)
     and generates stochastic shocks using Latin Hypercube Sampling (LHS).
+    Supports 6 uncertainty dimensions (including world commodity prices and interest rate shocks).
     """
     def __init__(self, regions, sectors):
         self.regions = regions
@@ -93,16 +94,18 @@ class ScenarioEngine:
     def generate_lhs_samples(self, num_trials):
         """
         Generates Latin Hypercube Samples for Monte Carlo runs.
-        We have 4 key uncertain variables:
+        We have 6 key uncertain variables:
         1. TFP shock factor (Normal distribution around scenario mean)
         2. War damage intensity (Log-normal distribution)
         3. Global export demand (Normal distribution)
         4. Foreign aid realization (Uniform distribution)
+        5. NBU interest rate policy shock (Uniform shift)
+        6. Global commodity world price shock (Normal distribution)
         
         Returns:
-            - Dict of trial_idx -> array of sampled values
+            - Dict of trial_idx -> dict of sampled values
         """
-        num_vars = 4
+        num_vars = 6
         # Create empty LHS design matrix
         design = np.zeros((num_trials, num_vars))
         
@@ -120,29 +123,37 @@ class ScenarioEngine:
         # Map design matrix columns to actual distributions
         samples = {}
         for trial in range(num_trials):
-            # 1. TFP shock (maps to multiplier centered at 1.0, std dev 0.02)
-            # Quantile function of normal distribution
+            # 1. TFP shock (centered at 1.0, std dev 0.02)
             tfp_p = design[trial, 0]
             tfp_shock = float(np.percentile(np.random.normal(1.0, 0.02, 10000), tfp_p * 100))
             
-            # 2. War damage (maps to % capital stock destroyed, lognormal to represent rare but severe spikes)
+            # 2. War damage
             wd_p = design[trial, 1]
-            # Map [0, 1] to a lognormal distribution with mean ~0.01, max up to ~0.08
             wd_shock = float(np.percentile(np.random.lognormal(-5.0, 0.8, 10000), wd_p * 100))
             
-            # 3. Export demand (centered at 1.0, std dev 0.08)
+            # 3. Export demand
             exp_p = design[trial, 2]
             export_shock = float(np.percentile(np.random.normal(1.0, 0.08, 10000), exp_p * 100))
             
-            # 4. Foreign aid realization (0.8x to 1.2x of projected aid)
+            # 4. Foreign aid multiplier (0.8x to 1.2x of projected aid)
             aid_p = design[trial, 3]
             aid_multiplier = 0.8 + 0.4 * aid_p
+            
+            # 5. NBU interest rate policy shock (-3.0% to +5.0% shift)
+            ir_p = design[trial, 4]
+            interest_rate_shock = -0.03 + 0.08 * ir_p
+            
+            # 6. Global commodity world price shock (0.7x to 1.4x of base)
+            wp_p = design[trial, 5]
+            world_price_shock = 0.7 + 0.7 * wp_p
             
             samples[trial] = {
                 'tfp_shock': tfp_shock,
                 'war_damage_intensity': wd_shock,
                 'export_demand_shock': export_shock,
-                'aid_multiplier': aid_multiplier
+                'aid_multiplier': aid_multiplier,
+                'interest_rate_shock': interest_rate_shock,
+                'world_price_shock': world_price_shock
             }
             
         return samples
@@ -159,8 +170,27 @@ class ScenarioEngine:
         # Apply foreign aid multiplier
         mods['foreign_aid_usd'] *= lhs_sample['aid_multiplier']
         
+        # Apply interest rate shock
+        mods['interest_rate_shock'] = lhs_sample['interest_rate_shock']
+        
+        # Construct world import and export prices vectors based on global price shock
+        p_world_export = np.ones(len(self.sectors))
+        p_world_import = np.ones(len(self.sectors))
+        
+        wp_shock = lhs_sample['world_price_shock']
+        commodity_sectors = [
+            'AgriGrain', 'AgriTechnical', 'SteelIron', 'MetalProducts', 'CoalMining', 
+            'OilGasExtraction', 'Agriculture', 'Metallurgy', 'Energy'
+        ]
+        for s_idx, s in enumerate(self.sectors):
+            if s in commodity_sectors:
+                p_world_export[s_idx] *= wp_shock
+                p_world_import[s_idx] *= wp_shock
+                
+        mods['p_world_export'] = p_world_export
+        mods['p_world_import'] = p_world_import
+        
         # Add war damage details to regions/sectors
-        # We assume frontline/eastern oblasts bear the brunt of capital destruction shocks.
         war_damage = {}
         intensity = lhs_sample['war_damage_intensity']
         
@@ -172,7 +202,7 @@ class ScenarioEngine:
             multiplier = 3.0 if r in high_risk_regions else 0.2
             for s in self.sectors:
                 # Energy and Metallurgy are highly targeted
-                sector_mult = 2.0 if s in ['Energy', 'Metallurgy', 'Transport'] else 0.5
+                sector_mult = 2.0 if s in ['Energy', 'Metallurgy', 'Transport', 'SteelIron', 'EnergyThermal', 'EnergyNuclearGen'] else 0.5
                 war_damage[r][s] = intensity * multiplier * sector_mult
                 
         mods['war_damage'] = war_damage

@@ -7,12 +7,13 @@ class DemographicEngine:
     and 2 health states (Active, Disabled).
     Integrates natural growth, Leslie matrix components, and health transitions.
     """
-    def __init__(self, regions, initial_pop, fertility_rates, mortality_rates, migration_gravity_coeffs):
+    def __init__(self, regions, initial_pop, fertility_rates, mortality_rates, migration_gravity_coeffs, distances=None):
         """
         initial_pop: dict of region -> {'Male': [18 cohorts], 'Female': [18 cohorts]}
         fertility_rates: dict of region -> fertility multiplier
         mortality_rates: dict of region -> {'Male': [18 values], 'Female': [18 values]}
         migration_gravity_coeffs: dict
+        distances: coordinates-based distance matrix (optional)
         """
         self.regions = regions
         self.R = len(regions)
@@ -68,7 +69,10 @@ class DemographicEngine:
             0.0042, 0.0060, 0.0090, 0.0130, 0.0190, 0.0270, 0.0380, 0.0550, 0.0800, 0.1100
         ]
 
-        self.distances = self._init_distance_matrix()
+        if distances is not None:
+            self.distances = distances
+        else:
+            self.distances = self._init_distance_matrix()
 
     @property
     def pop(self):
@@ -138,24 +142,44 @@ class DemographicEngine:
             # MICRO AGENT-BASED VECTORIZED DEMOGRAPHICS
             # ----------------------------------------------------
             N = abm.num_households
+            N = abm.num_households
             active_mask = abm.agent_health != 2  # Not deceased
             
-            # 1. Increment Age
+            # 1. Increment Age & Education transitions
             abm.agent_age[active_mask] += 1
-            # Update cohort mapping
             abm.agent_cohort = np.clip(abm.agent_age // 5, 0, 17)
             
+            # Education transition model for agents reaching working age (cohort 3: age 18)
+            # Unskilled (0) -> Semi-skilled (1) or Skilled (2)
+            transition_age = 18
+            at_transition = active_mask & (abm.agent_age == transition_age) & (abm.agent_labor == 0)
+            num_at_trans = np.sum(at_transition)
+            if num_at_trans > 0:
+                edu_mult = scenario_modifiers.get('education_spending_mult', 1.0)
+                p_skilled = np.clip(0.15 * edu_mult, 0.05, 0.40)
+                p_semiskilled = np.clip(0.35 * edu_mult, 0.15, 0.50)
+                p_unskilled = 1.0 - p_skilled - p_semiskilled
+                
+                new_labor = np.random.choice([0, 1, 2], size=num_at_trans, p=[p_unskilled, p_semiskilled, p_skilled])
+                abm.agent_labor[at_transition] = new_labor
+            
             # 2. Health Morbidity Transitions (Active -> Disabled)
-            # Probability is look-up based on cohort and gender
-            disable_probs = self.base_disability[abm.agent_cohort, abm.agent_gender]
-            # Frontline region risk increases disability
+            disable_probs = self.base_disability[abm.agent_cohort, abm.agent_gender].copy()
+            # Frontline region risk increases civilian disability
             for r_idx, r in enumerate(self.regions):
                 r_mask = abm.agent_region == r_idx
                 risk_lvl = scenario_modifiers.get('frontline_states', {}).get(r, 0)
-                if risk_lvl == 1: # High-risk
-                    disable_probs[r_mask & active_mask] += 0.005
-                elif risk_lvl == 2: # Occupied / Combat Zone
-                    disable_probs[r_mask & active_mask] += 0.020
+                if risk_lvl == 1:
+                    disable_probs[r_mask & active_mask] += 0.003
+                elif risk_lvl == 2:
+                    disable_probs[r_mask & active_mask] += 0.010
+                    
+            # Combat-specific disability for mobilized age groups (particularly males)
+            war_intensity = scenario_modifiers.get('war_damage_intensity', 0.02)
+            combat_age = (abm.agent_cohort >= 3) & (abm.agent_cohort <= 9)
+            males = abm.agent_gender == 0
+            combat_disable_prob = war_intensity * mobilization_rate * 2.5
+            disable_probs[combat_age & males & active_mask] += combat_disable_prob
 
             disable_draw = np.random.rand(N)
             disable_mask = active_mask & (abm.agent_health == 0) & (disable_draw < disable_probs)
@@ -189,7 +213,6 @@ class DemographicEngine:
             total_deaths = int(np.sum(death_mask))
             
             # 4. Fertility (Births)
-            # Females in cohorts 3 to 9 (ages 15-49)
             female_mask = (abm.agent_gender == 1) & (abm.agent_cohort >= 3) & (abm.agent_cohort <= 9)
             birth_probs = self.base_asfr[abm.agent_cohort] * fertility_modifier
             birth_draw = np.random.rand(N)
@@ -202,7 +225,6 @@ class DemographicEngine:
             
             if num_to_spawn > 0:
                 spawn_indices = deceased_slots[:num_to_spawn]
-                # Mothers' regions
                 mothers_regions = abm.agent_region[birth_mask][:num_to_spawn]
                 
                 abm.agent_region[spawn_indices] = mothers_regions
@@ -216,30 +238,42 @@ class DemographicEngine:
             total_births = num_to_spawn
             
             # 5. External Migration / Refugee Returns & Brain Drain
-            # Brain drain: Active skilled labor flees the country
+            # Brain drain: Active skilled labor flees the country (set to health 3)
             skilled_active = (abm.agent_labor == 2) & (abm.agent_health == 0) & active_mask
             brain_drain_draw = np.random.rand(N)
             flee_mask = skilled_active & (brain_drain_draw < brain_drain_rate)
-            abm.agent_health[flee_mask] = 2 # Set as deceased/left
-            total_deaths += int(np.sum(flee_mask)) # Count as loss
+            abm.agent_health[flee_mask] = 3 # Emigrated
             
-            # Returned refugees: spawn new agents in recycled slots
+            # Repatriation: transition from Emigrated (3) back to Active (0) in Ukraine
+            emigrated_mask = abm.agent_health == 3
+            num_emigrated = np.sum(emigrated_mask)
+            if num_emigrated > 0:
+                return_draw = np.random.rand(N)
+                return_mask = emigrated_mask & (return_draw < repatriation_rate)
+                num_returning = np.sum(return_mask)
+                if num_returning > 0:
+                    grp_per_capita = scenario_modifiers.get('grp_per_capita', {r: 1.0 for r in self.regions})
+                    attractions = np.array([grp_per_capita[r] for r in self.regions])
+                    attractions /= np.sum(attractions)
+                    ref_regions = np.random.choice(self.R, size=num_returning, p=attractions)
+                    
+                    abm.agent_region[return_mask] = ref_regions
+                    abm.agent_health[return_mask] = 0 # Return to Active status
+
+            # Spawn new agents from pre-2026 external pool to fill deceased slots
             refugee_pool = scenario_modifiers.get('refugee_pool', 5.0e6)
-            returned_refugees = int(refugee_pool * repatriation_rate * 0.10) # 1:10 scaling
+            returned_refugees = int(refugee_pool * repatriation_rate * 0.10)
             
             deceased_slots = np.where(abm.agent_health == 2)[0]
             num_refugees_to_spawn = min(returned_refugees, len(deceased_slots))
             
             if num_refugees_to_spawn > 0:
                 spawn_indices = deceased_slots[:num_refugees_to_spawn]
-                
-                # Distribute returned refugees across regions based on economic attraction (GRP proxy)
                 grp_per_capita = scenario_modifiers.get('grp_per_capita', {r: 1.0 for r in self.regions})
                 attractions = np.array([grp_per_capita[r] for r in self.regions])
                 attractions /= np.sum(attractions)
                 ref_regions = np.random.choice(self.R, size=num_refugees_to_spawn, p=attractions)
                 
-                # Demographics of refugees: 25% children (cohort 0-2), 65% working (cohort 3-12), 10% elderly (cohort 13-17)
                 ref_cohorts = np.random.choice(
                     np.arange(18), size=num_refugees_to_spawn,
                     p=[0.08,0.08,0.09, 0.08,0.08,0.08,0.08,0.07,0.06,0.05,0.05,0.05,0.05, 0.02,0.02,0.02,0.02,0.02]
@@ -248,13 +282,13 @@ class DemographicEngine:
                 abm.agent_region[spawn_indices] = ref_regions
                 abm.agent_cohort[spawn_indices] = ref_cohorts
                 abm.agent_age[spawn_indices] = ref_cohorts * 5 + np.random.randint(0, 5, size=num_refugees_to_spawn)
-                abm.agent_gender[spawn_indices] = np.random.choice([0, 1], size=num_refugees_to_spawn, p=[0.45, 0.55]) # female-skewed
+                abm.agent_gender[spawn_indices] = np.random.choice([0, 1], size=num_refugees_to_spawn, p=[0.45, 0.55])
                 abm.agent_health[spawn_indices] = np.random.choice([0, 1], size=num_refugees_to_spawn, p=[0.96, 0.04])
-                abm.agent_wealth[spawn_indices] = 10000.0 # small initial savings
+                abm.agent_wealth[spawn_indices] = 10000.0
                 abm.agent_labor[spawn_indices] = np.random.choice([0, 1, 2], size=num_refugees_to_spawn, p=[0.50, 0.35, 0.15])
             
-            # Optimized Vectorized Demographics Aggregation using np.bincount
-            living = abm.agent_health != 2
+            # Optimized Vectorized Demographics Aggregation using np.bincount (excludes health 2 and 3)
+            living = abm.agent_health <= 1
             flat_indices = (abm.agent_region[living].astype(int) * 72 + 
                             abm.agent_cohort[living].astype(int) * 4 + 
                             abm.agent_gender[living].astype(int) * 2 + 

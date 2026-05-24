@@ -160,7 +160,7 @@ class CGESolver:
                 
         self.calibrated = True
 
-    def evaluate_cge_algebra(self, prices, w_unskilled, w_semiskilled, w_skilled, capital_mat, labor_supply_mat, tfp_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0):
+    def evaluate_cge_algebra(self, prices, w_unskilled, w_semiskilled, w_skilled, capital_mat, labor_supply_mat, tfp_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0, interest_rate=0.15, p_world_import=None, p_world_export=None):
         """
         Evaluates core non-linear CGE equations: value added nesting, factor demands, trade flow clearance.
         """
@@ -171,7 +171,7 @@ class CGESolver:
                self.theta_s ** sig_L * w_skilled**(1-sig_L)) ** (1.0/(1.0-sig_L))
         
         # Capital rent (R, S)
-        rk = prices * 0.15
+        rk = prices * (interest_rate + 0.07)
         
         # Energy price index in each region (R,)
         pe = np.sum(prices[:, self.energy_indices] * self.energy_weights[np.newaxis, :], axis=1)
@@ -227,14 +227,24 @@ class CGESolver:
                 p_src = prices[:, s_idx]
                 p_comp_mat[:, s_idx] = shares.T @ p_src
                 
-            p_import_uah = exchange_rate * 1.0
+            if p_world_import is None:
+                p_world_import_vec = np.ones(self.S)
+            else:
+                p_world_import_vec = np.array(p_world_import)
+                
+            p_import_uah = exchange_rate * p_world_import_vec[np.newaxis, :]
             import_ratio = p_comp_mat / np.clip(p_import_uah, 1e-2, None)
             imports = d_total * self.base_import_vec[np.newaxis, :] * (import_ratio ** self.eta_World)
             imports = np.clip(imports, 0.0, d_total * 0.90)
             d_domestic = d_total - imports
             
             # Exports
-            p_export_uah = exchange_rate * 1.0
+            if p_world_export is None:
+                p_world_export_vec = np.ones(self.S)
+            else:
+                p_world_export_vec = np.array(p_world_export)
+                
+            p_export_uah = exchange_rate * p_world_export_vec[np.newaxis, :]
             export_ratio = p_export_uah / np.clip(prices, 1e-2, None)
             exports = y_val * self.base_export_vec[np.newaxis, :] * (export_ratio ** 1.8)
             exports = np.clip(exports, 0.0, y_val * 0.90)
@@ -275,7 +285,7 @@ class CGESolver:
         
         return excess, y_val, imports, exports
 
-    def evaluate_cge_equations(self, multipliers, capital_mat, labor_supply_mat, tfp_mat, prices_base_mat, wages_base_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0):
+    def evaluate_cge_equations(self, multipliers, capital_mat, labor_supply_mat, tfp_mat, prices_base_mat, wages_base_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0, interest_rate=0.15, p_world_import=None, p_world_export=None):
         mult_clip = np.clip(multipliers, 1e-3, 1e9)
         prices_mult = mult_clip[0:self.N].reshape((self.R, self.S))
         wages_skilled_mult = mult_clip[self.N:self.N+self.R]
@@ -297,11 +307,14 @@ class CGESolver:
             tfp_mat=tfp_mat,
             energy_util_mat=energy_util_mat,
             hh_demands_mat=hh_demands_mat,
-            exchange_rate=exchange_rate
+            exchange_rate=exchange_rate,
+            interest_rate=interest_rate,
+            p_world_import=p_world_import,
+            p_world_export=p_world_export
         )
         return excess
 
-    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0):
+    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=0.15, p_world_import=None, p_world_export=None):
         """
         Solves for the prices and wages that clear all CGE markets.
         Uses Powell hybrid method for small systems and fast tatonnement iterations for large systems.
@@ -334,7 +347,7 @@ class CGESolver:
             wages_base_mat[r_idx, 0] = labor_supply_by_type[r].get('unskilled_wage', 120000.0)
             wages_base_mat[r_idx, 2] = labor_supply_by_type[r].get('skilled_wage', 300000.0)
             wages_base_mat[r_idx, 1] = (wages_base_mat[r_idx, 0] + wages_base_mat[r_idx, 2]) / 2.0
-
+ 
         if self.S <= 15:
             # ----------------------------------------------------
             # POWELL HYBRID SOLVER (for legacy/unit tests)
@@ -351,7 +364,10 @@ class CGESolver:
                     wages_base_mat=wages_base_mat,
                     energy_util_mat=energy_util_mat,
                     hh_demands_mat=hh_demands_mat,
-                    exchange_rate=exchange_rate
+                    exchange_rate=exchange_rate,
+                    interest_rate=interest_rate,
+                    p_world_import=p_world_import,
+                    p_world_export=p_world_export
                 )
                 
             res = opt.root(obj_func, guess, method='hybr', options={'xtol': 1e-4, 'maxfev': 150})
@@ -390,7 +406,10 @@ class CGESolver:
                     tfp_mat=tfp_mat,
                     energy_util_mat=energy_util_mat,
                     hh_demands_mat=hh_demands_mat,
-                    exchange_rate=exchange_rate
+                    exchange_rate=exchange_rate,
+                    interest_rate=interest_rate,
+                    p_world_import=p_world_import,
+                    p_world_export=p_world_export
                 )
                 
                 excess_commodity = excess[0:self.N].reshape((self.R, self.S))
@@ -416,7 +435,7 @@ class CGESolver:
             wu_solved = wages_solved_mat[:, 0]
             wm_solved = wages_solved_mat[:, 1]
             ws_solved = wages_solved_mat[:, 2]
-
+ 
         # Re-evaluate final outputs, imports and exports
         _, y_val, imports, exports = self.evaluate_cge_algebra(
             prices=prices_solved_mat,
@@ -428,7 +447,10 @@ class CGESolver:
             tfp_mat=tfp_mat,
             energy_util_mat=energy_util_mat,
             hh_demands_mat=hh_demands_mat,
-            exchange_rate=exchange_rate
+            exchange_rate=exchange_rate,
+            interest_rate=interest_rate,
+            p_world_import=p_world_import,
+            p_world_export=p_world_export
         )
         
         # Populate results

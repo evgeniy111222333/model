@@ -164,20 +164,22 @@ class ABMEngine:
         compat_list = []
         limit = min(5000, self.num_households)
         for i in range(limit):
+            h_val = int(self.agent_health[i])
+            if h_val > 1: # Exclude deceased (2) and emigrated (3)
+                continue
             l_idx = int(self.agent_labor[i])
             l_type = ['unskilled', 'semi-skilled', 'skilled'][l_idx]
             if l_type == 'semi-skilled':
                 l_type = 'unskilled'
             cohort_str = '15-64'
-            active = True
             compat_list.append(HouseholdAgent(
                 agent_id=i,
                 region=self.regions[self.agent_region[i]],
                 labor_type=l_type,
                 wealth=float(self.agent_wealth[i]),
                 age_cohort=cohort_str,
-                active=active,
-                health=int(self.agent_health[i])
+                active=(h_val <= 1),
+                health=h_val
             ))
         return compat_list
 
@@ -249,7 +251,7 @@ class ABMEngine:
         aggregate_consumption = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
         
         for r_idx, r in enumerate(self.regions):
-            r_mask = (self.agent_region == r_idx) & (self.agent_health != 2)
+            r_mask = (self.agent_region == r_idx) & (self.agent_health <= 1)
             N_r = np.sum(r_mask)
             if N_r == 0:
                 continue

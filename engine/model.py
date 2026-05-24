@@ -20,13 +20,17 @@ class ModelRunner:
         self.S = len(self.sectors)
         self.initial_pop = copy.deepcopy(base_data['initial_pop'])
         
+        # Initialize distance and frontline states
+        self.distances = base_data.get('distances')
+        
         # Initialize Demographics
         self.demographics = DemographicEngine(
             regions=self.regions,
             initial_pop=self.initial_pop,
             fertility_rates=copy.deepcopy(base_data['fertility_rates']),
             mortality_rates=copy.deepcopy(base_data['mortality_rates']),
-            migration_gravity_coeffs=copy.deepcopy(base_data['migration_gravity'])
+            migration_gravity_coeffs=copy.deepcopy(base_data['migration_gravity']),
+            distances=self.distances
         )
         
         # Initialize Production
@@ -35,8 +39,6 @@ class ModelRunner:
             sectors=self.sectors
         )
         
-        # Initialize distance and frontline states
-        self.distances = base_data.get('distances')
         self.frontline_states = {}
         for r in self.regions:
             if r in ['Donetsk', 'Luhansk', 'Crimea', 'Sevastopol']:
@@ -125,6 +127,7 @@ class ModelRunner:
             # 1. Fetch Scenario & Shock Modifiers
             base_mods = scenario_engine.get_deterministic_modifiers(scenario_name, year)
             base_mods['refugee_pool'] = self.refugee_pool
+            base_mods['pension_rate'] = self.finance.pension_rate
             
             # GRP per capita for demographics gravity
             grp_per_capita = {}
@@ -230,7 +233,10 @@ class ModelRunner:
                 prices_init=self.prices,
                 energy_utilization=self.energy_utilization,
                 household_demands=aggregate_consumption,
-                exchange_rate=self.finance.exchange_rate
+                exchange_rate=self.finance.exchange_rate,
+                interest_rate=self.finance.interest_rate,
+                p_world_import=mods.get('p_world_import', None),
+                p_world_export=mods.get('p_world_export', None)
             )
             
             self.prices = prices_solved
@@ -293,6 +299,13 @@ class ModelRunner:
             # Living agents wealth
             household_wealth_sum = float(np.sum(self.abm.agent_wealth[self.abm.agent_health != 2]))
 
+            # Calculate pensioners: working-age disabled + elderly residing in Ukraine
+            if self.abm is not None:
+                residing = self.abm.agent_health <= 1
+                num_pensioners = float(np.sum(residing & ((self.abm.agent_cohort > 12) | (self.abm.agent_health == 1))))
+            else:
+                num_pensioners = float(np.sum(self.demographics.pop_array[:, 13:, :, :]) + np.sum(self.demographics.pop_array[:, :13, :, 1]))
+
             # Step Macro-Finance engine
             fin_results = self.finance.step(
                 year=year,
@@ -303,16 +316,21 @@ class ModelRunner:
                 exports_usd=total_exports_usd,
                 imports_usd=total_imports_usd,
                 scenario_modifiers=mods,
-                household_wealth_sum=household_wealth_sum
+                household_wealth_sum=household_wealth_sum,
+                num_pensioners=num_pensioners
             )
             
             # 9. Dynamic Capital Accumulation with Bank Lending
             bank_loans_added = fin_results['bank_loans']
             fdi_uah = mods.get('fdi_usd', 1.5e9) * fin_results['exchange_rate']
             aid_loans_uah = mods.get('foreign_aid_usd', 22.0e9) * (1.0 - mods.get('foreign_aid_grant_share', 0.50)) * fin_results['exchange_rate']
-            reinvested_profits = total_profits * 0.20
             
-            total_investment = fdi_uah + aid_loans_uah + reinvested_profits + bank_loans_added * 0.05
+            # Interest rates affect profit reinvestment share and bank loan investment share
+            reinvested_profits_share = np.clip(0.30 - 0.8 * fin_results['interest_rate'], 0.10, 0.25)
+            reinvested_profits = total_profits * reinvested_profits_share
+            bank_inv_share = np.clip(0.10 - 0.3 * fin_results['interest_rate'], 0.02, 0.08)
+            
+            total_investment = fdi_uah + aid_loans_uah + reinvested_profits + bank_loans_added * bank_inv_share
             
             investment_allocation = {}
             for r in self.regions:
@@ -349,10 +367,18 @@ class ModelRunner:
                 for s in self.sectors:
                     self.abm.firms[r][s].capital = self.capital[r][s]
             
-            # TFP growth step
+            # TFP growth step: region-specific tfp growth based on frontline status
             for r in self.regions:
+                state = self.frontline_states[r]
+                if state == 0:
+                    growth_rate = mods.get('tfp_growth', 0.018)
+                elif state == 1:
+                    growth_rate = -0.05
+                else: # state == 2
+                    growth_rate = 0.0
+                    
                 for s in self.sectors:
-                    self.tfp[r][s] *= (1.0 + mods.get('tfp_growth', 0.018))
+                    self.tfp[r][s] *= (1.0 + growth_rate)
 
             # Store year snapshot
             snapshot = {
@@ -372,6 +398,8 @@ class ModelRunner:
                 'tax_revenue_uah': fin_results['tax_revenue_uah'],
                 'bank_loans': fin_results['bank_loans'],
                 'bank_deposits': fin_results['bank_deposits'],
+                'nbu_fx_reserves_usd': fin_results.get('nbu_fx_reserves_usd', 38.0e9),
+                'pension_rate': fin_results.get('pension_rate', 50000.0),
                 'regional_data': {r: {
                     'grp_real': regional_grp_real[r],
                     'grp_nominal': regional_grp_nominal[r],

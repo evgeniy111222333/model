@@ -5,6 +5,7 @@ class FinanceEngine:
     Macroeconomic, banking, and financial system engine.
     Manages commercial banking balance sheets, credit creation, government deficit financing,
     OVDP bond yield curves, and NBU monetary policy rules.
+    Supports a three-tier banking system (State, Commercial corporate, and Retail).
     """
     def __init__(self, initial_debt_gdp=0.85, initial_exchange_rate=40.0, initial_money_supply=2.0e12):
         """
@@ -25,16 +26,41 @@ class FinanceEngine:
         self.tax_cit = 0.18 # Corporate Income Tax
         self.tax_vat = 0.20 # VAT
         self.tax_military = 0.05 # Military levy (5%)
+        self.tax_pension = 0.22 # Unified Social Contribution (pension tax)
         
-        # Commercial Banking Balance Sheet
+        # NBU FX Reserves
+        self.nbu_fx_reserves_usd = 38.0e9
+        self.pension_rate = 50000.0
+        
+        # Three-Tier Commercial Banking Balance Sheets
         self.reserve_ratio = 0.10 # NBU reserve requirement (10%)
-        self.deposits = 1.8e12 # Household savings deposits (UAH)
-        self.reserves = self.deposits * self.reserve_ratio
         
-        # Assets: Reserves + Loans + OVDP_Bonds = Deposits + Equity
-        self.equity = 0.15e12
-        self.loans = 0.9e12
-        self.ovdp_bonds = self.deposits + self.equity - self.reserves - self.loans
+        # Retail Banks
+        self.deposits_retail = 1.0e12
+        self.equity_retail = 0.04e12
+        self.reserves_retail = self.deposits_retail * self.reserve_ratio
+        self.loans_retail = 0.4e12
+        self.ovdp_bonds_retail = 0.54e12
+        
+        # Commercial Corporate Banks
+        self.deposits_comm = 0.6e12
+        self.equity_comm = 0.06e12
+        self.reserves_comm = self.deposits_comm * self.reserve_ratio
+        self.loans_comm = 0.5e12
+        self.ovdp_bonds_comm = 0.1e12
+        
+        # State Banks
+        self.deposits_state = 0.4e12
+        self.equity_state = 0.05e12
+        self.reserves_state = self.deposits_state * self.reserve_ratio
+        self.ovdp_bonds_state = 0.41e12
+        
+        # Aggregate stats (backwards compatibility)
+        self.deposits = self.deposits_retail + self.deposits_comm + self.deposits_state
+        self.reserves = self.reserves_state + self.reserves_comm + self.reserves_retail
+        self.loans = self.loans_comm + self.loans_retail
+        self.equity = self.equity_state + self.equity_comm + self.equity_retail
+        self.ovdp_bonds = self.ovdp_bonds_state + self.ovdp_bonds_comm + self.ovdp_bonds_retail
         
         # Government Debt Structure (Domestic vs External)
         self.external_debt_usd = 85.0e9 # External public debt in USD
@@ -54,14 +80,13 @@ class FinanceEngine:
             yields[term] = max(0.02, yields[term]) # Floor at 2% nominal yield
         return yields
 
-    def step(self, year, nominal_gdp_uah, nominal_gdp_usd, total_wages, corporate_profits, exports_usd, imports_usd, scenario_modifiers, household_wealth_sum=None):
+    def step(self, year, nominal_gdp_uah, nominal_gdp_usd, total_wages, corporate_profits, exports_usd, imports_usd, scenario_modifiers, household_wealth_sum=None, num_pensioners=None):
         """
         Executes one year fiscal and monetary transition.
         """
-        # Sync deposits to actual household wealth if provided by the model runner
+        # Sync retail deposits to actual household wealth if provided by the model runner
         if household_wealth_sum is not None:
-            self.deposits = max(0.1e12, household_wealth_sum)
-            self.reserves = self.deposits * self.reserve_ratio
+            self.deposits_retail = max(0.1e12, household_wealth_sum)
             
         # Scenario parameters
         defense_spend_ratio = scenario_modifiers.get('defense_spending_ratio', 0.25)
@@ -70,20 +95,31 @@ class FinanceEngine:
         foreign_aid_usd = scenario_modifiers.get('foreign_aid_usd', 22.0e9)
         grant_share = scenario_modifiers.get('foreign_aid_grant_share', 0.50)
         fdi_usd = scenario_modifiers.get('fdi_usd', 1.5e9)
+        war_intensity = scenario_modifiers.get('war_damage_intensity', 0.02)
         
         # 1. Tax Revenues (UAH)
         pit_rev = total_wages * (self.tax_pit + self.tax_military)
         cit_rev = corporate_profits * self.tax_cit
         vat_rev = nominal_gdp_uah * 0.5 * self.tax_vat
         customs_rev = imports_usd * self.exchange_rate * 0.05
+        pension_rev = total_wages * self.tax_pension
         
-        total_tax_revenue = pit_rev + cit_rev + vat_rev + customs_rev
+        total_tax_revenue = pit_rev + cit_rev + vat_rev + customs_rev + pension_rev
         
         # 2. Expenditures (UAH)
         defense_exp = nominal_gdp_uah * defense_spend_ratio
         social_exp = nominal_gdp_uah * social_spend_ratio
         recon_exp = reconstruction_needs * self.exchange_rate
         
+        # Dynamic pension benefits
+        if num_pensioners is not None:
+            dynamic_pension = pension_rev / max(1e5, num_pensioners)
+            self.pension_rate = np.clip(dynamic_pension, 30000.0, 90000.0)
+            pension_exp = self.pension_rate * num_pensioners
+        else:
+            self.pension_rate = 50000.0
+            pension_exp = self.pension_rate * 2.0e6
+            
         # Debt service costs: External (at 3.5% average rate) + Domestic (at 1-year OVDP yield)
         yields = self.get_yield_curve()
         domestic_yield = yields['1Y']
@@ -93,7 +129,7 @@ class FinanceEngine:
         debt_service_dom = self.domestic_debt_uah * domestic_yield
         debt_service = debt_service_ext + debt_service_dom
         
-        total_expenditure = defense_exp + social_exp + recon_exp + debt_service
+        total_expenditure = defense_exp + social_exp + recon_exp + debt_service + pension_exp
         
         # 3. Budget Deficit & Financing
         budget_deficit = total_expenditure - total_tax_revenue
@@ -111,51 +147,103 @@ class FinanceEngine:
         monetized_amount = max(0.0, domestic_financing_need) * monetization_rate
         domestic_borrowing = max(0.0, domestic_financing_need) - monetized_amount
         
-        # 4. Debt Accumulation & Bank Balance Sheet Updates
-        # External debt growth
+        # 4. Debt Accumulation
         self.external_debt_usd += aid_loans_usd
-        # Domestic debt growth
         self.domestic_debt_uah += domestic_borrowing
         
         total_debt_uah = (self.external_debt_usd * self.exchange_rate) + self.domestic_debt_uah
         self.debt_gdp = total_debt_uah / nominal_gdp_uah
         
-        # Commercial Bank assets updates
-        # Bank absorbs domestic borrowing as new OVDP bonds
-        self.ovdp_bonds = self.domestic_debt_uah
+        # 5. Banking Sector Updates & Non-Performing Loans (NPLs)
+        # NPL rates based on war intensity and high interest rates
+        npl_rate_comm = np.clip(0.03 + 0.50 * war_intensity + 0.40 * max(0.0, self.interest_rate - 0.10), 0.02, 0.60)
+        npl_rate_retail = np.clip(0.02 + 0.30 * war_intensity + 0.20 * max(0.0, self.interest_rate - 0.10), 0.02, 0.40)
         
-        # Credit Multiplier: Bank creates loans up to remaining capacity
-        # Assets = Reserves (10%) + Loans + OVDP_Bonds = Deposits + Equity
-        available_for_loans = self.deposits + self.equity - self.reserves - self.ovdp_bonds
-        self.loans = max(0.1e12, available_for_loans) # Floor to prevent credit freeze
+        # Systemic Panic Thresholds (Banking Crisis & Capital Flight)
+        capital_flight_triggered = False
+        if npl_rate_comm > 0.35 or npl_rate_retail > 0.25:
+            self.deposits_retail *= 0.80
+            self.deposits_comm *= 0.80
+            capital_flight_triggered = True
+            
+        # Write-offs reduce bank equity
+        writeoff_comm = self.loans_comm * npl_rate_comm * 0.15
+        writeoff_retail = self.loans_retail * npl_rate_retail * 0.10
+        self.equity_comm = max(1e9, self.equity_comm - writeoff_comm)
+        self.equity_retail = max(1e9, self.equity_retail - writeoff_retail)
         
-        # 5. Macro-Monetary & Exchange Rate dynamics
-        # BOP: Trade balance + Aid + FDI + external debt flows
+        # Update reserves
+        self.reserves_state = self.deposits_state * self.reserve_ratio
+        self.reserves_comm = self.deposits_comm * self.reserve_ratio
+        self.reserves_retail = self.deposits_retail * self.reserve_ratio
+        
+        # Update government bond holdings across tiers
+        self.ovdp_bonds_state = self.domestic_debt_uah * 0.50
+        self.ovdp_bonds_comm = self.domestic_debt_uah * 0.15
+        self.ovdp_bonds_retail = self.domestic_debt_uah * 0.35
+        
+        # Update loans with Capital Adequacy Ratio limits and liquidity capacity (crowding out)
+        avail_comm = self.deposits_comm + self.equity_comm - self.reserves_comm - self.ovdp_bonds_comm
+        car_comm_limit = self.equity_comm / 0.08
+        self.loans_comm = max(0.1e12, min(avail_comm, car_comm_limit))
+        
+        avail_retail = self.deposits_retail + self.equity_retail - self.reserves_retail - self.ovdp_bonds_retail
+        car_retail_limit = self.equity_retail / 0.08
+        self.loans_retail = max(0.1e12, min(avail_retail, car_retail_limit))
+        
+        # Sync aggregate stats for backward compatibility
+        self.reserves = self.reserves_state + self.reserves_comm + self.reserves_retail
+        self.loans = self.loans_comm + self.loans_retail
+        self.deposits = self.deposits_retail + self.deposits_comm + self.deposits_state
+        self.ovdp_bonds = self.ovdp_bonds_state + self.ovdp_bonds_comm + self.ovdp_bonds_retail
+        self.equity = self.equity_state + self.equity_comm + self.equity_retail
+        
+        # 6. BOP and NBU FX Interventions
         trade_balance_usd = exports_usd - imports_usd
         capital_account_flows = foreign_aid_usd + fdi_usd
+        if capital_flight_triggered:
+            capital_account_flows -= 2.0e9 # $2B capital flight outflow
         bop_usd = trade_balance_usd + capital_account_flows
         
-        # Exchange rate shifts (BOP surpluses strengthen UAH, deficits weaken it)
-        kappa = 0.15
-        er_pct_change = -kappa * (bop_usd / max(1e9, nominal_gdp_usd))
-        # Limit annual fluctuations to protect numerical bounds
-        er_pct_change = np.clip(er_pct_change, -0.15, 0.40)
+        # NBU defends UAH if BOP < 0, else buys reserves
+        if bop_usd < 0:
+            needed_intervention = -bop_usd
+            actual_intervention = min(needed_intervention, self.nbu_fx_reserves_usd * 0.30)
+            self.nbu_fx_reserves_usd -= actual_intervention
+            remaining_bop_deficit = needed_intervention - actual_intervention
+            
+            # Currency crisis if reserves drop below 5B
+            if self.nbu_fx_reserves_usd < 5.0e9:
+                crisis_depreciation = 0.25
+                kappa = 0.35
+            else:
+                crisis_depreciation = 0.0
+                kappa = 0.15
+                
+            er_pct_change = kappa * (remaining_bop_deficit / max(1e9, nominal_gdp_usd)) + crisis_depreciation
+        else:
+            # BOP surplus: NBU buys 50% into reserves
+            reserves_added = bop_usd * 0.50
+            self.nbu_fx_reserves_usd += reserves_added
+            remaining_bop_surplus = bop_usd - reserves_added
+            
+            kappa = 0.15
+            er_pct_change = -kappa * (remaining_bop_surplus / max(1e9, nominal_gdp_usd))
+            
+        er_pct_change = np.clip(er_pct_change, -0.15, 0.60)
         self.exchange_rate *= (1.0 + er_pct_change)
         
         # Money supply growth (M2) includes base money growth + bank credit expansion
         prev_money_supply = self.money_supply
-        self.money_supply += monetized_amount # increase base money
-        
-        # Total M2 including multiplier effect
+        self.money_supply += monetized_amount
         m2_money_supply = self.money_supply / self.reserve_ratio
         
-        # Base Money Growth Rate
         ms_growth = (self.money_supply - prev_money_supply) / max(1e-5, prev_money_supply)
         
         # Inflation rate dynamics (Taylor-Monetarist)
         gdp_growth = scenario_modifiers.get('gdp_growth', 0.03)
-        theta_m = 0.4 # Money growth pass-through
-        theta_er = 0.25 # Exchange rate pass-through to inflation
+        theta_m = 0.4
+        theta_er = 0.25
         
         d_inflation = (
             theta_m * (ms_growth - gdp_growth) +
@@ -166,7 +254,8 @@ class FinanceEngine:
         
         # NBU Taylor policy rule (interest rate response to inflation deviations)
         neutral_rate = 0.05
-        self.interest_rate = max(0.02, neutral_rate + 1.6 * (self.inflation_rate - self.inflation_target))
+        ir_shock = scenario_modifiers.get('interest_rate_shock', 0.0)
+        self.interest_rate = max(0.02, neutral_rate + 1.6 * (self.inflation_rate - self.inflation_target) + ir_shock)
         
         return {
             'tax_revenue_uah': total_tax_revenue,
@@ -182,5 +271,9 @@ class FinanceEngine:
             'money_supply': m2_money_supply,
             'bank_loans': self.loans,
             'bank_deposits': self.deposits,
-            'yield_curve': yields
+            'yield_curve': yields,
+            'pension_rate': self.pension_rate,
+            'nbu_fx_reserves_usd': self.nbu_fx_reserves_usd,
+            'npl_comm': npl_rate_comm,
+            'npl_retail': npl_rate_retail
         }

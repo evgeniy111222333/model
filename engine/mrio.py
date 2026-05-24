@@ -4,15 +4,16 @@ import scipy.linalg as la
 class MRIOSolver:
     """
     Multi-Regional Input-Output (MRIO) Leontief solver.
-    Tracks inter-sectoral and inter-regional trade flows for 27 regions and 15 sectors (405 nodes).
+    Tracks inter-sectoral and inter-regional trade flows for 27 regions and N sectors.
     Solves the equation: X = (I - A)^-1 * Y, under capacity constraints.
+    Supports real coordinate distances for gravity-based trade shares calibration.
     """
-    def __init__(self, regions, sectors, base_tech_coefficients):
+    def __init__(self, regions, sectors, base_tech_coefficients, distances=None):
         """
         regions: list of 27 regions
-        sectors: list of 15 sectors
+        sectors: list of sectors
         base_tech_coefficients: dict of sector -> {input_sector: coefficient}
-                                e.g. how much input from sector J is needed per unit of output in sector I.
+        distances: coordinates-based distance matrix (optional)
         """
         self.regions = regions
         self.sectors = sectors
@@ -21,6 +22,7 @@ class MRIOSolver:
         self.N = self.R * self.S
         
         self.base_tech = base_tech_coefficients
+        self.distances = distances
         
         # Build index mapping
         self.node_to_idx = {}
@@ -37,21 +39,22 @@ class MRIOSolver:
 
     def _build_initial_A(self):
         """
-        Constructs the large direct requirements matrix A (405 x 405).
+        Constructs the large direct requirements matrix A (N x N).
         Combines technical sector needs with spatial trade weights.
         Trade flows are distributed using a gravity model:
-        Region r's sector s imports from region q's sector s based on distance and region q's output capacity.
+        Region r's sector s imports from region q's sector s based on coordinate distances.
         """
         A = np.zeros((self.N, self.N))
         
-        # Simple distance decay matrix for gravity-based trade distribution
+        # Distance decay matrix for gravity-based trade distribution
         trade_gravity = np.zeros((self.R, self.R))
         for i in range(self.R):
             for j in range(self.R):
                 if i == j:
-                    trade_gravity[i, j] = 1.0 # High self-consumption
+                    trade_gravity[i, j] = 1.0 # High self-consumption (home bias)
                 else:
-                    trade_gravity[i, j] = 0.2 / (1.0 + abs(i - j) * 0.1) # Distance decay
+                    dist = self.distances[i, j] if self.distances is not None else (100.0 + abs(i - j) * 35.0)
+                    trade_gravity[i, j] = 0.2 / (1.0 + dist * 0.001) # Distance decay
                     
         # Normalize trade rows (how each region sources its inputs for a given sector)
         for s_idx in range(self.S):
@@ -71,6 +74,8 @@ class MRIOSolver:
                 # Check what inputs s_out requires
                 reqs = self.base_tech.get(s_out, {})
                 for s_in, tech_coeff in reqs.items():
+                    if s_in not in self.sectors:
+                        continue
                     # Distribute s_in requirements across all sourcing regions
                     for r_in in self.regions:
                         r_in_idx = self.regions.index(r_in)
