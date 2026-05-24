@@ -402,7 +402,8 @@ class ModelRunner:
                     p_world_export=p_world_export,
                     wages_by_type=self.wages_by_type,
                     eu_integration_progress=eu_progress,
-                    year=year
+                    year=year,
+                    quarter=q_idx
                 )
                 
                 # Calvo sticky prices: blend solved equilibrium with previous prices

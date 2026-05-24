@@ -102,7 +102,9 @@ def get_depreciation_rate(sector):
         return 0.025
     elif sector in [
         'HeavyMachinery', 'TransportMachinery', 'AgriMachinery', 'ElectricalEquipment',
-        'PrecisionInstruments', 'ElectronicsComponents', 'IndustrialRobots'
+        'PrecisionInstruments', 'ElectronicsComponents', 'IndustrialRobots',
+        # Military sectors
+        'MilSmallArms', 'MilArmoredVehicles', 'MilArtillery', 'MilMissiles', 'MilUAVs', 'MilEW', 'MilNaval', 'MilProtectiveGear'
     ]:
         return 0.10
     elif sector in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
@@ -320,18 +322,22 @@ class AdaptiveExpectations:
     def update(self, actual_inflation, actual_wage_growth, actual_grp_growth_by_region, labor_type='unskilled'):
         """
         Update expectations based on actual observed values.
-        Uses separate adaptation speeds for each labor type.
+        Uses labor_type parameter to select appropriate adaptation speed.
         """
-        # Update all labor types with their respective lambda for realistic modeling
-        # This ensures skilled agents update faster than unskilled
-        for lt, lam in [('skilled', self.lambda_skilled), ('semi-skilled', self.lambda_semi), ('unskilled', self.lambda_unskilled)]:
-            self.expected_inflation = lam * actual_inflation + (1.0 - lam) * self.expected_inflation
-            self.expected_wage_growth = lam * actual_wage_growth + (1.0 - lam) * self.expected_wage_growth
+        if labor_type == 'skilled':
+            lam = self.lambda_skilled
+        elif labor_type == 'semi-skilled':
+            lam = self.lambda_semi
+        else:
+            lam = self.lambda_unskilled
+        
+        # Adaptive update: new = lambda * actual + (1-lambda) * old
+        self.expected_inflation = lam * actual_inflation + (1.0 - lam) * self.expected_inflation
+        self.expected_wage_growth = lam * actual_wage_growth + (1.0 - lam) * self.expected_wage_growth
         
         for r, grp_g in actual_grp_growth_by_region.items():
             if r not in self.expected_grp_growth:
                 self.expected_grp_growth[r] = 0.0
-            # Use average lambda for regional GRP expectations
             avg_lam = (self.lambda_skilled + self.lambda_unskilled) / 2.0
             self.expected_grp_growth[r] = avg_lam * grp_g + (1.0 - avg_lam) * self.expected_grp_growth[r]
     
@@ -434,7 +440,11 @@ class HousingMarket:
             
             # Price adjustment: gradual convergence to demand/supply balance
             # Use log-scale to prevent explosive growth from large ratios
-            price_mult = 1.0 + np.log(max(0.1, demand_ratio)) * 0.1 + expected_inflation
+            # Clamp demand_ratio to prevent extreme deflation
+            demand_ratio_clamped = np.clip(demand_ratio, 0.3, 3.0)
+            price_mult = 1.0 + np.log(demand_ratio_clamped) * 0.1 + expected_inflation
+            # Limit price changes per year: max 30% increase, max 20% decrease
+            price_mult = np.clip(price_mult, 0.80, 1.30)
             self.housing_prices[r] *= price_mult
             self.housing_prices[r] = np.clip(self.housing_prices[r], 0.1, 100.0)
             

@@ -451,7 +451,7 @@ class CGESolver:
         )
         return excess
 
-    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None, wages_by_type=None, eu_integration_progress=0.0, year=2026):
+    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None, wages_by_type=None, eu_integration_progress=0.0, year=2026, quarter=0):
         if interest_rate is not None:
             self.interest_rate = interest_rate
         else:
@@ -470,11 +470,11 @@ class CGESolver:
         """
         Solves for the prices and wages that clear all CGE markets.
         Uses Powell hybrid method for small systems and fast tatonnement iterations for large systems.
-        Recalibrates trade shares periodically as EU integration changes home bias.
+        Recalibrates trade shares every 5 years ONLY in Q1 to avoid redundant recalculations.
         """
-        # Recalibrate every 5 years or if not yet calibrated
+        # Recalibrate every 5 years ONLY in Q1 (quarter == 0)
         recal_interval = 5
-        needs_recal = (not self.calibrated) or ((year - 2026) % recal_interval == 0)
+        needs_recal = (not self.calibrated) or ((quarter == 0) and ((year - 2026) % recal_interval == 0))
         
         if needs_recal:
             self.calibrate_parameters(capital, labor_supply_by_type, tfp, household_demands,
