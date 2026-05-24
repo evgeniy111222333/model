@@ -1,6 +1,35 @@
 import numpy as np
 import scipy.optimize as opt
 
+def get_sector_wage_premium(s):
+    # IT sectors
+    if s in ['ITServicesExport', 'ITProductSaaS', 'Cybersecurity', 'Telecom', 'InternetCloud']:
+        return 3.0
+    # Finance sectors
+    elif s in ['BankState', 'BankCommercial', 'BankRetail', 'Insurance', 'NonBankFinance', 'SecuritiesMarket', 'InternationalFinance']:
+        return 1.4
+    # Defense sectors
+    elif s in ['MilSmallArms', 'MilArmoredVehicles', 'MilArtillery', 'MilMissiles', 'MilUAVs', 'MilEW', 'MilNaval', 'MilProtectiveGear']:
+        return 1.5
+    # Energy Nuclear & utilities
+    elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste', 'EnergyTransmission']:
+        return 1.3
+    # Health private/pharma
+    elif s in ['HealthPrivate', 'PharmaGenerics', 'PharmaOriginals', 'PharmaAPI', 'MedicalDevices', 'Biotechnologies']:
+        return 1.2
+    # Agriculture
+    elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
+        return 0.7
+    # Retail / Service / Tourism
+    elif s in ['TradeRetail', 'TradeWholesale', 'HotelsTourism', 'FoodServices', 'Beverages', 'Tobacco']:
+        return 0.8
+    # Public Admin / Education / Public Healthcare
+    elif s in ['PublicAdmin', 'LawEnforcement', 'UtilityServices', 'GasHeatSupply', 'MilitaryDefense', 'GeneralEduVoc', 'HigherEducation', 'HealthPublic']:
+        return 0.9
+    # Metallurgy, Construction, Chemicals, Machinery, Transport, others
+    else:
+        return 1.0
+
 class CGESolver:
     """
     Computable General Equilibrium (CGE) market clearing solver.
@@ -49,11 +78,72 @@ class CGESolver:
         self.theta_m = 0.35
         self.theta_s = 0.15
         
-        self.theta_L = 0.55
-        self.theta_KE = 0.45
+        # Sector-specific elasticities of production (alpha=capital, beta=labor, gamma=energy)
+        self.alpha_vec = np.zeros(self.S)
+        self.beta_vec = np.zeros(self.S)
+        self.gamma_vec = np.zeros(self.S)
         
-        self.theta_K = 0.70
-        self.theta_E = 0.30
+        for s_idx, s in enumerate(self.sectors):
+            # IT / SaaS
+            if s in ['ITServicesExport', 'ITProductSaaS', 'Cybersecurity', 'Telecom', 'InternetCloud', 'EdTech']:
+                self.beta_vec[s_idx] = 0.85
+                self.alpha_vec[s_idx] = 0.12
+                self.gamma_vec[s_idx] = 0.03
+            # Energy / Utilities
+            elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste', 'EnergyThermal', 'EnergyTransmission', 'UtilityServices', 'GasHeatSupply']:
+                self.alpha_vec[s_idx] = 0.70
+                self.beta_vec[s_idx] = 0.15
+                self.gamma_vec[s_idx] = 0.15
+            # Agriculture
+            elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
+                self.alpha_vec[s_idx] = 0.40
+                self.beta_vec[s_idx] = 0.40
+                self.gamma_vec[s_idx] = 0.20
+            # Metallurgy / Heavy Industry / Chemicals
+            elif s in ['SteelIron', 'MetalProducts', 'NonFerrousMetal', 'IronOreMining', 'ChemicalFertilizers', 'IndustrialChemicals', 'PetrochemicalsPlastics', 'BuildingMaterials']:
+                self.alpha_vec[s_idx] = 0.50
+                self.beta_vec[s_idx] = 0.35
+                self.gamma_vec[s_idx] = 0.15
+            # Healthcare / PublicAdmin / Education
+            elif s in ['HealthPublic', 'HealthPrivate', 'HealthRehab', 'HealthMental', 'PublicAdmin', 'LawEnforcement', 'MilitaryDefense', 'GeneralEduVoc', 'HigherEducation']:
+                self.beta_vec[s_idx] = 0.75
+                self.alpha_vec[s_idx] = 0.20
+                self.gamma_vec[s_idx] = 0.05
+            # Other sectors (Machinery, Military-Industrial, Transport, Retail, Finance, Tourism, etc.)
+            else:
+                self.alpha_vec[s_idx] = 0.35
+                self.beta_vec[s_idx] = 0.50
+                self.gamma_vec[s_idx] = 0.15
+                
+        # Derive nested share parameters
+        self.theta_L_vec = self.beta_vec
+        self.theta_KE_vec = 1.0 - self.beta_vec
+        self.theta_K_vec = self.alpha_vec / np.clip(1.0 - self.beta_vec, 1e-5, None)
+        self.theta_E_vec = self.gamma_vec / np.clip(1.0 - self.beta_vec, 1e-5, None)
+        
+        # Sector-specific depreciation rates
+        self.depreciation_vec = np.zeros(self.S)
+        for s_idx, s in enumerate(self.sectors):
+            # IT
+            if s in ['ITServicesExport', 'ITProductSaaS', 'Telecom', 'InternetCloud', 'Cybersecurity', 'EdTech']:
+                self.depreciation_vec[s_idx] = 0.25
+            # Buildings / Real Estate
+            elif s in ['ConstResidential', 'ConstCommercial', 'ConstInfrastructure', 'ConstReconstruction', 'RealEstateOps']:
+                self.depreciation_vec[s_idx] = 0.03
+            # Nuclear Energy
+            elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste']:
+                self.depreciation_vec[s_idx] = 0.025
+            # Machinery & Military-Industrial
+            elif s in ['HeavyMachinery', 'TransportMachinery', 'AgriMachinery', 'ElectricalEquipment', 'PrecisionInstruments', 'ElectronicsComponents', 'IndustrialRobots'] or s.startswith('Mil'):
+                self.depreciation_vec[s_idx] = 0.10
+            # Agriculture
+            elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
+                self.depreciation_vec[s_idx] = 0.08
+            # Others
+            else:
+                self.depreciation_vec[s_idx] = 0.07
+                
+        self.wage_premium_vec = np.array([get_sector_wage_premium(s) for s in self.sectors], dtype=np.float64)
         
         self.calibrated = False
         self.trade_shares = None
@@ -181,14 +271,18 @@ class CGESolver:
         """
         Evaluates core non-linear CGE equations: value added nesting, factor demands, trade flow clearance.
         """
-        # 1. Labor cost index: w_L (R,)
+        # 1. Labor cost index: w_L (R, S)
         sig_L = self.sigma_L
-        w_L = (self.theta_u ** sig_L * w_unskilled**(1-sig_L) + 
-               self.theta_m ** sig_L * w_semiskilled**(1-sig_L) + 
-               self.theta_s ** sig_L * w_skilled**(1-sig_L)) ** (1.0/(1.0-sig_L))
+        wu_eff = w_unskilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
+        wm_eff = w_semiskilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
+        ws_eff = w_skilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
         
-        # Capital rent (R, S)
-        rk = prices * (interest_rate + 0.07)
+        w_L = (self.theta_u ** sig_L * wu_eff**(1-sig_L) + 
+               self.theta_m ** sig_L * wm_eff**(1-sig_L) + 
+               self.theta_s ** sig_L * ws_eff**(1-sig_L)) ** (1.0/(1.0-sig_L))
+        
+        # Capital rent (R, S) with sector-specific depreciation rates
+        rk = prices * (interest_rate + self.depreciation_vec[np.newaxis, :])
         
         # Energy price index in each region (R,)
         pe = np.sum(prices[:, self.energy_indices] * self.energy_weights[np.newaxis, :], axis=1)
@@ -196,29 +290,24 @@ class CGESolver:
         # 2. Capital-Energy index: p_KE (R, S)
         sig_KE = self.sigma_KE
         pe_bc = pe[:, np.newaxis]
-        p_KE = (self.theta_K ** sig_KE * rk**(1-sig_KE) + 
-                self.theta_E ** sig_KE * pe_bc**(1-sig_KE)) ** (1.0/(1.0-sig_KE))
+        p_KE = (self.theta_K_vec[np.newaxis, :] ** sig_KE * rk**(1-sig_KE) + 
+                self.theta_E_vec[np.newaxis, :] ** sig_KE * pe_bc**(1-sig_KE)) ** (1.0/(1.0-sig_KE))
         
         # 3. Value Added index: p_VA (R, S)
         sig_VA = self.sigma_VA
-        w_L_bc = w_L[:, np.newaxis]
-        p_VA = (self.theta_L ** sig_VA * w_L_bc**(1-sig_VA) + 
-                self.theta_KE ** sig_VA * p_KE**(1-sig_VA)) ** (1.0/(1.0-sig_VA))
+        p_VA = (self.theta_L_vec[np.newaxis, :] ** sig_VA * w_L**(1-sig_VA) + 
+                self.theta_KE_vec[np.newaxis, :] ** sig_VA * p_KE**(1-sig_VA)) ** (1.0/(1.0-sig_VA))
         
         # 4. Production Output: Y (R, S)
-        cap_factor = (capital_mat ** 0.50) * energy_util_mat
-        y_val = tfp_mat * cap_factor * (prices / np.clip(p_VA, 1e-2, None)) ** 0.50
+        cap_factor = (capital_mat ** self.alpha_vec[np.newaxis, :]) * (energy_util_mat ** self.gamma_vec[np.newaxis, :])
+        y_val = tfp_mat * cap_factor * (prices / np.clip(p_VA, 1e-2, None)) ** self.beta_vec[np.newaxis, :]
         
         # 5. Factor Demands
-        L_composite = y_val * (p_VA / np.clip(w_L_bc, 1e-2, None)) ** sig_VA * self.theta_L
+        L_composite = y_val * (p_VA / np.clip(w_L, 1e-2, None)) ** sig_VA * self.theta_L_vec[np.newaxis, :]
         
-        wu_bc = w_unskilled[:, np.newaxis]
-        wm_bc = w_semiskilled[:, np.newaxis]
-        ws_bc = w_skilled[:, np.newaxis]
-        
-        L_u = L_composite * (w_L_bc / np.clip(wu_bc, 1e-2, None)) ** sig_L * self.theta_u
-        L_m = L_composite * (w_L_bc / np.clip(wm_bc, 1e-2, None)) ** sig_L * self.theta_m
-        L_s = L_composite * (w_L_bc / np.clip(ws_bc, 1e-2, None)) ** sig_L * self.theta_s
+        L_u = L_composite * (w_L / np.clip(wu_eff, 1e-2, None)) ** sig_L * self.theta_u
+        L_m = L_composite * (w_L / np.clip(wm_eff, 1e-2, None)) ** sig_L * self.theta_m
+        L_s = L_composite * (w_L / np.clip(ws_eff, 1e-2, None)) ** sig_L * self.theta_s
         
         dem_unskilled = np.sum(L_u, axis=1)
         dem_semiskilled = np.sum(L_m, axis=1)

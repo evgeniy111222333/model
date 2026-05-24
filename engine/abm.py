@@ -1,5 +1,35 @@
 import numpy as np
 
+def get_sector_wage_premium(s):
+    # IT sectors
+    if s in ['ITServicesExport', 'ITProductSaaS', 'Cybersecurity', 'Telecom', 'InternetCloud']:
+        return 3.0
+    # Finance sectors
+    elif s in ['BankState', 'BankCommercial', 'BankRetail', 'Insurance', 'NonBankFinance', 'SecuritiesMarket', 'InternationalFinance']:
+        return 1.4
+    # Defense sectors
+    elif s in ['MilSmallArms', 'MilArmoredVehicles', 'MilArtillery', 'MilMissiles', 'MilUAVs', 'MilEW', 'MilNaval', 'MilProtectiveGear']:
+        return 1.5
+    # Energy Nuclear & utilities
+    elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste', 'EnergyTransmission']:
+        return 1.3
+    # Health private/pharma
+    elif s in ['HealthPrivate', 'PharmaGenerics', 'PharmaOriginals', 'PharmaAPI', 'MedicalDevices', 'Biotechnologies']:
+        return 1.2
+    # Agriculture
+    elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
+        return 0.7
+    # Retail / Service / Tourism
+    elif s in ['TradeRetail', 'TradeWholesale', 'HotelsTourism', 'FoodServices', 'Beverages', 'Tobacco']:
+        return 0.8
+    # Public Admin / Education / Public Healthcare
+    elif s in ['PublicAdmin', 'LawEnforcement', 'UtilityServices', 'GasHeatSupply', 'MilitaryDefense', 'GeneralEduVoc', 'HigherEducation', 'HealthPublic']:
+        return 0.9
+    # Metallurgy, Construction, Chemicals, Machinery, Transport, others
+    else:
+        return 1.0
+
+
 class HouseholdAgent:
     """
     Backwards compatibility wrapper representing an individual agent view.
@@ -66,6 +96,25 @@ class ABMEngine:
         self.agent_health = None
         self.agent_age = None
         self.agent_pension_wealth = None
+        self.agent_sector = None
+        
+        self.wage_premium_vec = np.array([get_sector_wage_premium(s) for s in self.sectors], dtype=np.float32)
+        
+        # Sector depreciation vector in ABMEngine
+        self.depreciation_vec = np.zeros(self.S, dtype=np.float32)
+        for s_idx, s in enumerate(self.sectors):
+            if s in ['ITServicesExport', 'ITProductSaaS', 'Telecom', 'InternetCloud', 'Cybersecurity', 'EdTech']:
+                self.depreciation_vec[s_idx] = 0.25
+            elif s in ['ConstResidential', 'ConstCommercial', 'ConstInfrastructure', 'ConstReconstruction', 'RealEstateOps']:
+                self.depreciation_vec[s_idx] = 0.03
+            elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste']:
+                self.depreciation_vec[s_idx] = 0.025
+            elif s in ['HeavyMachinery', 'TransportMachinery', 'AgriMachinery', 'ElectricalEquipment', 'PrecisionInstruments', 'ElectronicsComponents', 'IndustrialRobots'] or s.startswith('Mil'):
+                self.depreciation_vec[s_idx] = 0.10
+            elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
+                self.depreciation_vec[s_idx] = 0.08
+            else:
+                self.depreciation_vec[s_idx] = 0.07
         
         self.firms = {}
         
@@ -152,6 +201,23 @@ class ABMEngine:
         # Pillar 2 pension accounts initialization
         self.agent_pension_wealth = (5000.0 + np.random.exponential(10000.0, size=self.num_households)).astype(np.float32)
         
+        # Sector allocation for agents based on initial capital shares of sectors in their region
+        self.agent_sector = np.zeros(self.num_households, dtype=np.int8)
+        if self.num_households <= 5000:
+            self.agent_sector = np.random.choice(self.S, size=self.num_households).astype(np.int8)
+        else:
+            for r_idx, r in enumerate(self.regions):
+                r_mask = self.agent_region == r_idx
+                N_r = np.sum(r_mask)
+                if N_r > 0:
+                    cap_shares = np.array([initial_capital[r][s] for s in self.sectors])
+                    sum_cap = np.sum(cap_shares)
+                    if sum_cap > 0:
+                        cap_shares /= sum_cap
+                    else:
+                        cap_shares = np.ones(self.S) / self.S
+                    self.agent_sector[r_mask] = np.random.choice(self.S, size=N_r, p=cap_shares).astype(np.int8)
+        
         # Initialize firm agents
         self.firms = {}
         for r in self.regions:
@@ -197,7 +263,7 @@ class ABMEngine:
         p_indices = np.zeros(self.R)
         risks = np.zeros(self.R)
         for r_idx, r in enumerate(self.regions):
-            p_indices[r_idx] = sum(budget_shares.get(s, 1.0 / self.S) * prices[r][s] for s in self.sectors)
+            p_indices[r_idx] = sum(budget_shares[r].get(s, 1.0 / self.S) * prices[r][s] for s in self.sectors)
             risks[r_idx] = scenario_modifiers.get('frontline_states', {}).get(r, 0)
             if risks[r_idx] == 1:
                 risks[r_idx] = 0.5
@@ -209,6 +275,8 @@ class ABMEngine:
         beta_risk = 3.0
         
         active_mask = (self.agent_health == 0) & (self.agent_cohort >= 3) & (self.agent_cohort <= 12)
+        
+        old_regions = self.agent_region.copy()
         
         for r_from_idx in range(self.R):
             r_from = self.regions[r_from_idx]
@@ -243,22 +311,49 @@ class ABMEngine:
                 new_regions = np.random.choice(self.R, size=N_g, p=probs)
                 self.agent_region[group_mask] = new_regions
 
+        # Re-allocate sectors for agents who migrated based on destination region capital shares
+        migrated_mask = self.agent_region != old_regions
+        migrated_indices = np.where(migrated_mask)[0]
+        if len(migrated_indices) > 0:
+            for r_idx, r in enumerate(self.regions):
+                r_dest_mask = migrated_mask & (self.agent_region == r_idx)
+                N_dest = np.sum(r_dest_mask)
+                if N_dest > 0:
+                    cap_shares = np.array([self.firms[r][s].capital for s in self.sectors])
+                    sum_cap = np.sum(cap_shares)
+                    if sum_cap > 0:
+                        cap_shares /= sum_cap
+                    else:
+                        cap_shares = np.ones(self.S) / self.S
+                    self.agent_sector[r_dest_mask] = np.random.choice(self.S, size=N_dest, p=cap_shares).astype(np.int8)
+
         # 2. Vectorized Stone-Geary LES Consumption & Wealth Update
         real_people_per_agent = 10.0
         interest_rate = scenario_modifiers.get('interest_rate', 0.15)
-        deposit_interest_rate = interest_rate * 0.8
+        is_q = scenario_modifiers.get('is_quarterly', False)
         
-        # Distribute deceased agents' pension wealth to living active agents in the region
+        deposit_interest_rate = (interest_rate * 0.8) / 4.0 if is_q else (interest_rate * 0.8)
+        
+        # Concentrated inheritance of wealth and pension wealth
         deceased_mask = self.agent_health == 2
+        deceased_indices = np.where(deceased_mask)[0]
         for r_idx in range(self.R):
-            r_deceased_mask = deceased_mask & (self.agent_region == r_idx)
-            total_deceased_pension = np.sum(self.agent_pension_wealth[r_deceased_mask])
-            if total_deceased_pension > 0:
-                r_active_mask = (self.agent_health == 0) & (self.agent_region == r_idx)
-                num_active = np.sum(r_active_mask)
-                if num_active > 0:
-                    self.agent_wealth[r_active_mask] += float(total_deceased_pension / num_active)
-                self.agent_pension_wealth[r_deceased_mask] = 0.0
+            r_deceased = deceased_indices[self.agent_region[deceased_indices] == r_idx]
+            if len(r_deceased) == 0:
+                continue
+            
+            r_active_indices = np.where((self.agent_health == 0) & (self.agent_region == r_idx))[0]
+            if len(r_active_indices) > 0:
+                total_w = self.agent_wealth[r_deceased]
+                total_pw = self.agent_pension_wealth[r_deceased]
+                
+                # Pick random active heirs in the same region
+                heirs = np.random.choice(r_active_indices, size=len(r_deceased))
+                np.add.at(self.agent_wealth, heirs, total_w)
+                np.add.at(self.agent_wealth, heirs, total_pw)
+                
+            self.agent_wealth[r_deceased] = 0.0
+            self.agent_pension_wealth[r_deceased] = 0.0
         
         aggregate_consumption = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
         
@@ -280,35 +375,50 @@ class ABMEngine:
             w_semiskilled = wages_by_type[r].get('semi-skilled', (w_skilled + w_unskilled) / 2.0)
             
             wages_r = np.array([w_unskilled, w_semiskilled, w_skilled])
-            agent_wages = wages_r[labor_sub]
+            agent_sector_sub = self.agent_sector[r_mask]
+            agent_wages = wages_r[labor_sub] * self.wage_premium_vec[agent_sector_sub]
             
             # Pillar 2 individual accumulative pension contribution (4%)
             is_worker = (cohort_sub >= 3) & (cohort_sub <= 12) & (health_sub == 0)
+            
+            # Remittances channel: emigrants from this region send money back
+            r_emigrants = np.sum((self.agent_region == r_idx) & (self.agent_health == 3))
+            remittance_annual = 150000.0
+            total_remittances_r = r_emigrants * (remittance_annual / 4.0 if is_q else remittance_annual)
+            remittances_per_worker = 0.0
+            if total_remittances_r > 0:
+                num_workers = np.sum(is_worker)
+                if num_workers > 0:
+                    remittances_per_worker = total_remittances_r / num_workers
+            
             pension_pillar2_contrib = np.where(is_worker, agent_wages * 0.04, 0.0)
             pension_wealth_sub += pension_pillar2_contrib
             
             # Accumulated interest on Pillar 2 pension accounts
             pension_wealth_sub *= (1.0 + deposit_interest_rate)
             
-            # Net income after taxes (Solidarity USC + income tax + military levy)
-            income = np.where(is_worker, agent_wages * (1.0 - tax - 0.04), 0.0)
+            # Net income after taxes (Solidarity USC + income tax + military levy) + remittances
+            income = np.where(is_worker, agent_wages * (1.0 - tax - 0.04) + remittances_per_worker, 0.0)
             
             # State Pension (Pillar 1)
             pension_rate = scenario_modifiers.get('pension_rate', 50000.0)
+            pension_rate_q = pension_rate / 4.0 if is_q else pension_rate
             is_pensioner = (cohort_sub > 12) | (health_sub == 1)
-            income += np.where(is_pensioner, pension_rate * (1.0 - tax), 0.0)
+            income += np.where(is_pensioner, pension_rate_q * (1.0 - tax), 0.0)
             
             # Private Pension Annuity Payout (Pillar 2)
             # Pensioners receive 8% of their accumulated Pillar 2 pension wealth as private pension supplement
             is_retired_pensioner = (cohort_sub > 12) & (health_sub == 0)
-            private_annuity = np.where(is_retired_pensioner, pension_wealth_sub * 0.08, 0.0)
+            annuity_rate = 0.08 / 4.0 if is_q else 0.08
+            private_annuity = np.where(is_retired_pensioner, pension_wealth_sub * annuity_rate, 0.0)
             pension_wealth_sub -= private_annuity
             income += private_annuity
             
             # Save pension wealth back
             self.agent_pension_wealth[r_mask] = pension_wealth_sub.astype(np.float32)
             
-            wealth_draw = wealth_sub * 0.15
+            w_draw_rate = 0.15 / 4.0 if is_q else 0.15
+            wealth_draw = wealth_sub * w_draw_rate
             liquidity = income + wealth_draw
             
             prices_r = np.array([prices[r][s] for s in self.sectors])
@@ -318,17 +428,18 @@ class ABMEngine:
             super_income = np.clip(liquidity - subsist_cost, 0.0, None)
             
             sufficient_mask = liquidity >= subsist_cost
+            w_penalty_rate = 0.05 / 4.0 if is_q else 0.05
             new_wealth = np.where(
                 sufficient_mask,
                 np.clip(wealth_sub + super_income * 0.10 - wealth_draw, 0.0, None),
-                np.clip(wealth_sub - liquidity * 0.05, 0.0, None)
+                np.clip(wealth_sub - liquidity * w_penalty_rate, 0.0, None)
             )
             self.agent_wealth[r_mask] = new_wealth.astype(np.float32)
             
             for s_idx, s in enumerate(self.sectors):
                 p = prices[r][s]
                 sub_qty = subsistence_demands[r][s]
-                b_share = budget_shares.get(s, 1.0 / self.S)
+                b_share = budget_shares[r].get(s, 1.0 / self.S)
                 
                 qty = np.where(
                     sufficient_mask,
@@ -371,7 +482,6 @@ class ABMEngine:
         """
         interest_rate = scenario_modifiers.get('interest_rate', 0.15)
         war_damage = scenario_modifiers.get('war_damage', {})
-        depreciation = 0.07
         
         fdi_uah = scenario_modifiers.get('fdi_usd', 1.5e9) * scenario_modifiers.get('exchange_rate', 40.0)
         aid_uah = scenario_modifiers.get('foreign_aid_usd', 22.0e9) * (1.0 - scenario_modifiers.get('foreign_aid_grant_share', 0.50)) * scenario_modifiers.get('exchange_rate', 40.0)
@@ -389,7 +499,7 @@ class ABMEngine:
                     capital_next[r][s] = 1e-3
                 continue
                 
-            for s in self.sectors:
+            for s_idx, s in enumerate(self.sectors):
                 firm = self.firms[r][s]
                 out_qty = realized_output.get((r, s), 0.0)
                 out_val = out_qty * prices[r][s]
@@ -397,6 +507,7 @@ class ABMEngine:
                 out_share = out_qty / max(1e-5, total_sector_output[s])
                 firm_profit = total_profits * out_share * 0.10 # estimate individual profit
                 
+                depreciation = self.depreciation_vec[s_idx]
                 # Dynamic investment planning
                 mpk = out_val / max(1e-5, firm.capital)
                 inv = firm.plan_investment(firm_profit, interest_rate, mpk, depreciation, war_damage.get(r, {}).get(s, 0.0))

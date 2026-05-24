@@ -462,7 +462,8 @@ def generate_baseline_data():
             target_final_demand[(r, s)] = reg_total_demand_uah * share
 
     # 5. ABM / CGE Parameters
-    budget_shares = {}
+    # Calculate base shares
+    base_shares = {}
     for s in SECTORS:
         p = SUB_SECTORS[s]
         p_dw = parent_demand_weights.get(p, 0.05)
@@ -470,10 +471,29 @@ def generate_baseline_data():
         siblings = [sib for sib, parent in SUB_SECTORS.items() if parent == p]
         tot_sib_w = sum(SUPPLY_WEIGHTS.get(sib, 1.0) for sib in siblings)
         norm_sub_w = sub_w / (tot_sib_w if tot_sib_w > 0 else 1.0)
-        budget_shares[s] = p_dw * norm_sub_w
+        base_shares[s] = p_dw * norm_sub_w
+    sum_bs = sum(base_shares.values())
+    base_shares = {k: v / sum_bs for k, v in base_shares.items()}
+    
+    budget_shares = {}
+    for r in REGIONS:
+        budget_shares[r] = {}
+        reg_weight = reg_grp_weights.get(r, 0.01) / total_grp_weight
         
-    sum_bs = sum(budget_shares.values())
-    budget_shares = {k: v / sum_bs for k, v in budget_shares.items()}
+        r_budget_shares = {}
+        for s in SECTORS:
+            p = SUB_SECTORS[s]
+            base_share = base_shares[s]
+            
+            is_essential = p in ['Agriculture', 'Healthcare', 'Energy'] or s in ['FoodProcessing', 'UtilityServices', 'GasHeatSupply']
+            if is_essential:
+                r_budget_shares[s] = base_share * (1.2 - 0.15 * min(4.0, reg_weight * len(REGIONS)))
+            else:
+                r_budget_shares[s] = base_share * (0.8 + 0.15 * min(4.0, reg_weight * len(REGIONS)))
+            r_budget_shares[s] = max(1e-5, r_budget_shares[s])
+            
+        sum_rbs = sum(r_budget_shares.values())
+        budget_shares[r] = {k: v / sum_rbs for k, v in r_budget_shares.items()}
     
     subsistence_demands = {}
     for r in REGIONS:
@@ -484,7 +504,7 @@ def generate_baseline_data():
         reg_cons_uah = 3.0e12 * reg_weight
         
         for s in SECTORS:
-            share = budget_shares[s]
+            share = budget_shares[r][s]
             parent = SUB_SECTORS[s]
             if parent in ['Agriculture', 'Healthcare'] or s in [
                 'FoodProcessing', 'UtilityServices', 'GasHeatSupply', 'EnergyThermal',
