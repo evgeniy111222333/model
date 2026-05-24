@@ -4,8 +4,8 @@ import scipy.optimize as opt
 class CGESolver:
     """
     Computable General Equilibrium (CGE) market clearing solver.
-    Solves non-linear equations for prices, skilled wages, and unskilled wages
-    that clear all commodity and labor markets under nested CES production.
+    Solves 486 non-linear equations (405 commodity prices + 27 * 3 labor wages)
+    using a fully vectorized NumPy matrix representation to bypass Python loops.
     """
     def __init__(self, regions, sectors, base_tech_coefficients):
         self.regions = regions
@@ -26,163 +26,178 @@ class CGESolver:
                 self.idx_to_node.append((r, s))
                 idx += 1
                 
-        # Elasticities of Substitution (Standard GTAP values for transition economies)
-        self.sigma_VA = 0.85   # VA elasticity (Labor vs Capital-Energy)
+        # Build direct requirement coefficient matrix B (15 x 15)
+        # B[i, j] = how much of sector i is needed per unit of output of sector j
+        self.B_mat = np.zeros((self.S, self.S))
+        for s_idx, s in enumerate(self.sectors):
+            reqs = self.base_tech.get(s, {})
+            for s_in, coeff in reqs.items():
+                s_in_idx = self.sectors.index(s_in)
+                self.B_mat[s_in_idx, s_idx] = coeff
+                
+        # Elasticities of Substitution
+        self.sigma_VA = 0.85   # Value Added: Labor vs Capital-Energy
         self.sigma_KE = 0.50   # Capital vs Energy
-        self.sigma_L = 1.25    # Skilled vs Unskilled Labor
-        self.sigma_INT = 0.30  # Substitution of intermediate inputs
-        self.eta_Arm = 2.20    # Armington elasticity (local vs trade imports)
+        self.sigma_L = 1.25    # Labor types: Skilled vs Semi-skilled vs Unskilled
+        self.sigma_INT = 0.30  # Intermediate inputs
+        self.eta_Arm = 2.20    # Armington Regional Trade
+        self.eta_World = 1.80  # Armington World Import
         
-        # Share parameters (will be calibrated in baseline)
+        # CES Share parameters
+        self.theta_u = 0.50
+        self.theta_m = 0.35
+        self.theta_s = 0.15
+        
+        self.theta_L = 0.55
+        self.theta_KE = 0.45
+        
+        self.theta_K = 0.70
+        self.theta_E = 0.30
+        
         self.calibrated = False
+        self.trade_shares = None
+        self.distances = None
+
+    def _init_distances(self):
+        self.distances = np.zeros((self.R, self.R))
+        for i in range(self.R):
+            for j in range(self.R):
+                if i == j:
+                    self.distances[i, j] = 1.0
+                else:
+                    self.distances[i, j] = 100.0 + abs(i - j) * 35.0
 
     def calibrate_parameters(self, capital, labor_supply, tfp, target_demand):
         """
-        Calibrates the share parameters (thetas) for nested CES and Armington functions
-        so that the initial 2026 data represents an equilibrium at prices and wages = 1.0.
+        Calibrates trade shares using gravity formulation.
         """
-        self.theta_L = 0.55   # Labor share in VA
-        self.theta_KE = 0.45  # Capital-Energy share in VA
-        self.theta_K = 0.70   # Capital share in KE
-        self.theta_E = 0.30   # Energy share in KE
-        self.theta_Skilled = 0.40 # Skilled labor share in Labor
-        self.theta_Unskilled = 0.60
-        
-        # Base trade shares (gravity-weighted Armington shares)
+        if self.distances is None:
+            self._init_distances()
+            
         self.trade_shares = np.zeros((self.R, self.R, self.S))
+        
         for s_idx, s in enumerate(self.sectors):
-            for r_from_idx in range(self.R):
-                for r_to_idx in range(self.R):
-                    if r_from_idx == r_to_idx:
-                        self.trade_shares[r_from_idx, r_to_idx, s_idx] = 0.75
-                    else:
-                        self.trade_shares[r_from_idx, r_to_idx, s_idx] = 0.25 / (self.R - 1)
-                        
+            for r_dest_idx in range(self.R):
+                weights = np.zeros(self.R)
+                for r_src_idx in range(self.R):
+                    dist = self.distances[r_src_idx, r_dest_idx]
+                    cap_src = sum(capital[self.regions[r_src_idx]].values())
+                    weights[r_src_idx] = cap_src / (dist ** 1.3)
+                    
+                weights[r_dest_idx] *= 5.0 # high home bias
+                
+                sum_w = np.sum(weights)
+                if sum_w > 0:
+                    weights /= sum_w
+                else:
+                    weights = np.zeros(self.R)
+                    weights[r_dest_idx] = 1.0
+                    
+                self.trade_shares[:, r_dest_idx, s_idx] = weights
+                
         self.calibrated = True
 
-    def evaluate_cge_equations(self, variables, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands):
+    def evaluate_cge_equations(self, multipliers, capital_mat, labor_supply_mat, tfp_mat, prices_base_mat, wages_base_mat, energy_util_mat, hh_demands_mat):
         """
-        Calculates excess demands for all markets.
-        variables: numpy array of size 459:
-            - prices: [0:405]
-            - skilled wages: [405:432]
-            - unskilled wages: [432:459]
+        Evaluates excess demands using fully vectorized matrix algebra.
         """
-        # Unpack variables and enforce boundaries (prices/wages must be positive)
-        prices_flat = np.clip(variables[0:self.N], 1e-3, 1e9)
-        w_skilled = np.clip(variables[self.N:self.N+self.R], 1e-3, 1e9)
-        w_unskilled = np.clip(variables[self.N+self.R:self.N+2*self.R], 1e-3, 1e9)
+        # Multipliers clipped for numerical bounds
+        mult_clip = np.clip(multipliers, 1e-3, 1e9)
+        prices_mult = mult_clip[0:self.N].reshape((self.R, self.S))
+        wages_skilled_mult = mult_clip[self.N:self.N+self.R]
+        wages_semiskilled_mult = mult_clip[self.N+self.R:self.N+2*self.R]
+        wages_unskilled_mult = mult_clip[self.N+2*self.R:self.N+3*self.R]
         
-        # Re-structure variables for easy access
-        prices = {}
-        idx = 0
-        for r in self.regions:
-            prices[r] = {}
-            for s in self.sectors:
-                prices[r][s] = prices_flat[idx]
-                idx += 1
-                
-        # 1. Evaluate production demand
-        firm_demand_skilled = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
-        firm_demand_unskilled = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
-        commodity_supplies = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
-        intermediate_demands = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
+        # Prices (R, S) and Wages (R, 3)
+        prices = prices_base_mat * prices_mult
         
-        for r_idx, r in enumerate(self.regions):
-            ws = w_skilled[r_idx]
-            wu = w_unskilled[r_idx]
+        w_unskilled = wages_base_mat[:, 0] * wages_unskilled_mult
+        w_semiskilled = wages_base_mat[:, 1] * wages_semiskilled_mult
+        w_skilled = wages_base_mat[:, 2] * wages_skilled_mult
+        
+        # 1. Labor cost index: w_L (R,)
+        sig_L = self.sigma_L
+        w_L = (self.theta_u ** sig_L * w_unskilled**(1-sig_L) + 
+               self.theta_m ** sig_L * w_semiskilled**(1-sig_L) + 
+               self.theta_s ** sig_L * w_skilled**(1-sig_L)) ** (1.0/(1.0-sig_L))
+        
+        # Capital rent (R, S)
+        rk = prices * 0.15
+        
+        # Energy price in each region (R,)
+        pe = prices[:, 3] # Energy is index 3 in SECTORS
+        
+        # 2. Capital-Energy index: p_KE (R, S)
+        sig_KE = self.sigma_KE
+        pe_bc = pe[:, np.newaxis]
+        p_KE = (self.theta_K ** sig_KE * rk**(1-sig_KE) + 
+                self.theta_E ** sig_KE * pe_bc**(1-sig_KE)) ** (1.0/(1.0-sig_KE))
+        
+        # 3. Value Added index: p_VA (R, S)
+        sig_VA = self.sigma_VA
+        w_L_bc = w_L[:, np.newaxis]
+        p_VA = (self.theta_L ** sig_VA * w_L_bc**(1-sig_VA) + 
+                self.theta_KE ** sig_VA * p_KE**(1-sig_VA)) ** (1.0/(1.0-sig_VA))
+        
+        # 4. Production Output: Y (R, S)
+        cap_factor = (capital_mat ** 0.50) * energy_util_mat
+        y_val = tfp_mat * cap_factor * (prices / np.clip(p_VA, 1e-2, None)) ** 0.50
+        
+        # 5. Factor Demands
+        L_composite = y_val * (p_VA / np.clip(w_L_bc, 1e-2, None)) ** sig_VA * self.theta_L
+        
+        wu_bc = w_unskilled[:, np.newaxis]
+        wm_bc = w_semiskilled[:, np.newaxis]
+        ws_bc = w_skilled[:, np.newaxis]
+        
+        L_u = L_composite * (w_L_bc / np.clip(wu_bc, 1e-2, None)) ** sig_L * self.theta_u
+        L_m = L_composite * (w_L_bc / np.clip(wm_bc, 1e-2, None)) ** sig_L * self.theta_m
+        L_s = L_composite * (w_L_bc / np.clip(ws_bc, 1e-2, None)) ** sig_L * self.theta_s
+        
+        dem_unskilled = np.sum(L_u, axis=1)
+        dem_semiskilled = np.sum(L_m, axis=1)
+        dem_skilled = np.sum(L_s, axis=1)
+        
+        # 6. Intermediate Demands (R, S)
+        # B_mat is (S, S), y_val is (R, S), so y_val @ B_mat.T represents required intermediate inputs
+        intermediate_demands = y_val @ self.B_mat.T
+        
+        # 7. Armington Trade Distribution
+        d_total = hh_demands_mat + intermediate_demands
+        d_domestic = d_total * 0.85
+        
+        total_commodity_demand = np.zeros((self.R, self.S))
+        
+        for s_idx in range(self.S):
+            # shares is (R, R) -> from src (row) to dest (col)
+            shares = self.trade_shares[:, :, s_idx]
+            p_src = prices[:, s_idx]
             
-            # Blend wage index (dual price of Labor L)
-            # W_L = ( theta_S^sigma * W_S^(1-sigma) + theta_U^sigma * W_U^(1-sigma) ) ^ (1/(1-sigma))
-            sig_l = self.sigma_L
-            w_l = (self.theta_Skilled ** sig_l * ws**(1-sig_l) + 
-                   self.theta_Unskilled ** sig_l * wu**(1-sig_l)) ** (1.0/(1.0-sig_l))
+            # composite price in each destination region (R,)
+            p_comp = shares.T @ p_src
             
-            for s_idx, s in enumerate(self.sectors):
-                k = capital[r][s]
-                a_tfp = tfp[r][s]
-                util = energy_utilization[r][s]
-                p_out = prices[r][s]
-                
-                # Approximate capital rent
-                r_k = p_out * 0.15 # baseline return on capital
-                
-                # Energy price index
-                p_e = prices[r]['Energy']
-                
-                # Blend Capital-Energy index
-                sig_ke = self.sigma_KE
-                p_ke = (self.theta_K ** sig_ke * r_k**(1-sig_ke) + 
-                        self.theta_E ** sig_ke * p_e**(1-sig_ke)) ** (1.0/(1.0-sig_ke))
-                
-                # Blend Value Added index
-                sig_va = self.sigma_VA
-                p_va = (self.theta_L ** sig_va * w_l**(1-sig_va) + 
-                        self.theta_KE ** sig_va * p_ke**(1-sig_va)) ** (1.0/(1.0-sig_va))
-                        
-                # Gross output: Y = TFP * K^alpha * L^beta * E^gamma
-                # For CGE consistency, output matches price signals
-                y_val = a_tfp * (k ** 0.35) * (util ** 0.15) * (p_out / max(1e-2, p_va)) ** 0.50
-                commodity_supplies[r][s] = y_val
-                
-                # Factor demands using Shephard's lemma (derivative of cost with respect to factor price)
-                # Labor demand
-                l_val = y_val * (p_va / max(1e-2, w_l)) ** sig_va * self.theta_L
-                
-                # Skilled vs Unskilled Labor splitting
-                firm_demand_skilled[r][s] = l_val * (w_l / max(1e-2, ws)) ** sig_l * self.theta_Skilled
-                firm_demand_unskilled[r][s] = l_val * (w_l / max(1e-2, wu)) ** sig_l * self.theta_Unskilled
-                
-                # Intermediate demands from other sectors (Leontief linkage)
-                reqs = self.base_tech.get(s, {})
-                for s_in, coeff in reqs.items():
-                    intermediate_demands[r][s_in] += y_val * coeff
+            # Adjust trade shares based on relative prices
+            shares_adj = shares * (p_comp / np.clip(p_src[:, np.newaxis], 1e-2, None)) ** self.eta_Arm
+            
+            # Normalize trade shares per destination column
+            sum_shares = np.sum(shares_adj, axis=0)
+            sum_shares[sum_shares == 0] = 1.0
+            shares_adj /= sum_shares
+            
+            total_commodity_demand[:, s_idx] = shares_adj @ d_domestic[:, s_idx]
 
-        # 2. Armington Trade Distribution
-        # Distribute intermediate and household demands across sourcing regions based on relative prices
-        total_commodity_demand = {r: {s: 0.0 for s in self.sectors} for r in self.regions}
+        # 8. Excess Demands
+        excess_commodity = (total_commodity_demand - y_val).flatten()
+        excess_labor_skilled = dem_skilled - labor_supply_mat[:, 2]
+        excess_labor_semiskilled = dem_semiskilled - labor_supply_mat[:, 1]
+        excess_labor_unskilled = dem_unskilled - labor_supply_mat[:, 0]
         
-        for s_idx, s in enumerate(self.sectors):
-            for r_to_idx, r_to in enumerate(self.regions):
-                # Total demand in region r_to for sector s (household + intermediate)
-                d_total = household_demands[r_to].get(s, 0.0) + intermediate_demands[r_to].get(s, 0.0)
-                
-                # Distribute across sourcing regions r_from using Armington shares
-                # share_from = trade_share * (P_to / P_from) ^ eta
-                prices_s = np.array([prices[rx][s] for rx in self.regions])
-                shares = self.trade_shares[:, r_to_idx, s_idx] * (prices_s[r_to_idx] / np.clip(prices_s, 1e-2, None)) ** self.eta_Arm
-                sum_sh = np.sum(shares)
-                if sum_sh > 0:
-                    shares /= sum_sh
-                    
-                for r_from_idx, r_from in enumerate(self.regions):
-                    total_commodity_demand[r_from][s] += d_total * shares[r_from_idx]
-
-        # 3. Calculate Excess Demands (Supply - Demand)
-        excess_commodity = np.zeros(self.N)
-        idx = 0
-        for r in self.regions:
-            for s in self.sectors:
-                excess_commodity[idx] = commodity_supplies[r][s] - total_commodity_demand[r][s]
-                idx += 1
-                
-        excess_labor_skilled = np.zeros(self.R)
-        excess_labor_unskilled = np.zeros(self.R)
-        
-        for r_idx, r in enumerate(self.regions):
-            # Aggregate firm demands
-            tot_skilled_demand = sum(firm_demand_skilled[r][s] for s in self.sectors)
-            tot_unskilled_demand = sum(firm_demand_unskilled[r][s] for s in self.sectors)
-            
-            # Labor supply from ABM
-            sup_skilled = labor_supply_by_type[r]['skilled']
-            sup_unskilled = labor_supply_by_type[r]['unskilled']
-            
-            excess_labor_skilled[r_idx] = tot_skilled_demand - sup_skilled
-            excess_labor_unskilled[r_idx] = tot_unskilled_demand - sup_unskilled
-
-        # Concatenate into a single excess demand vector (459 equations)
-        return np.concatenate([excess_commodity, excess_labor_skilled, excess_labor_unskilled])
+        return np.concatenate([
+            excess_commodity, 
+            excess_labor_skilled, 
+            excess_labor_semiskilled, 
+            excess_labor_unskilled
+        ])
 
     def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands):
         """
@@ -192,61 +207,102 @@ class CGESolver:
         if not self.calibrated:
             self.calibrate_parameters(capital, labor_supply_by_type, tfp, household_demands)
             
-        # Initial guess vector (prices and wages around baseline)
-        prices_guess = np.array([prices_init[r][s] for r in self.regions for s in self.sectors])
-        wages_skilled_guess = np.array([300000.0 for _ in self.regions]) # average skilled wage
-        wages_unskilled_guess = np.array([120000.0 for _ in self.regions]) # average unskilled wage
+        # Convert all input dictionary variables to NumPy arrays (R, S) or (R, 3)
+        capital_mat = np.zeros((self.R, self.S))
+        tfp_mat = np.zeros((self.R, self.S))
+        prices_init_mat = np.zeros((self.R, self.S))
+        energy_util_mat = np.zeros((self.R, self.S))
+        hh_demands_mat = np.zeros((self.R, self.S))
         
-        guess = np.concatenate([prices_guess, wages_skilled_guess, wages_unskilled_guess])
+        for r_idx, r in enumerate(self.regions):
+            for s_idx, s in enumerate(self.sectors):
+                capital_mat[r_idx, s_idx] = capital[r][s]
+                tfp_mat[r_idx, s_idx] = tfp[r][s]
+                prices_init_mat[r_idx, s_idx] = prices_init[r][s]
+                energy_util_mat[r_idx, s_idx] = energy_utilization[r][s]
+                hh_demands_mat[r_idx, s_idx] = household_demands[r][s]
+                
+        labor_supply_mat = np.zeros((self.R, 3))
+        wages_base_mat = np.zeros((self.R, 3))
         
-        # Objective function for Scipy root solver
+        for r_idx, r in enumerate(self.regions):
+            labor_supply_mat[r_idx, 0] = labor_supply_by_type[r]['unskilled']
+            labor_supply_mat[r_idx, 1] = labor_supply_by_type[r].get('semi-skilled', labor_supply_by_type[r]['unskilled'] * 0.70)
+            labor_supply_mat[r_idx, 2] = labor_supply_by_type[r]['skilled']
+            
+            # Baseline wages
+            wages_base_mat[r_idx, 0] = labor_supply_by_type[r].get('unskilled_wage', 120000.0)
+            wages_base_mat[r_idx, 2] = labor_supply_by_type[r].get('skilled_wage', 300000.0)
+            wages_base_mat[r_idx, 1] = (wages_base_mat[r_idx, 0] + wages_base_mat[r_idx, 2]) / 2.0
+            
+        guess = np.ones(self.N + 3 * self.R)
+        
         def obj_func(vars):
             return self.evaluate_cge_equations(
-                variables=vars,
-                capital=capital,
-                labor_supply_by_type=labor_supply_by_type,
-                tfp=tfp,
-                prices_init=prices_init,
-                energy_utilization=energy_utilization,
-                household_demands=household_demands
+                multipliers=vars,
+                capital_mat=capital_mat,
+                labor_supply_mat=labor_supply_mat,
+                tfp_mat=tfp_mat,
+                prices_base_mat=prices_init_mat,
+                wages_base_mat=wages_base_mat,
+                energy_util_mat=energy_util_mat,
+                hh_demands_mat=hh_demands_mat
             )
             
-        # Run Powell hybrid method (very robust and efficient for economic CGE equations)
+        # Run Powell hybrid method
         res = opt.root(obj_func, guess, method='hybr', options={'xtol': 1e-4, 'maxfev': 150})
         
-        # Unpack solved values
-        solved_vars = res.x
-        prices_flat = np.clip(solved_vars[0:self.N], 1e-3, 1e9)
-        wages_skilled = np.clip(solved_vars[self.N:self.N+self.R], 1e-3, 1e9)
-        wages_unskilled = np.clip(solved_vars[self.N+self.R:self.N+2*self.R], 1e-3, 1e9)
+        # Unpack solved multipliers and clip
+        solved_mult = np.clip(res.x, 1e-3, 1e9)
+        prices_mult = solved_mult[0:self.N].reshape((self.R, self.S))
+        wages_skilled_mult = solved_mult[self.N:self.N+self.R]
+        wages_semiskilled_mult = solved_mult[self.N+self.R:self.N+2*self.R]
+        wages_unskilled_mult = solved_mult[self.N+2*self.R:self.N+3*self.R]
         
-        # Re-format outputs
+        # Re-construct wages and prices
         prices_solved = {}
-        idx = 0
-        for r in self.regions:
+        for r_idx, r in enumerate(self.regions):
             prices_solved[r] = {}
-            for s in self.sectors:
-                prices_solved[r][s] = prices_flat[idx]
-                idx += 1
+            for s_idx, s in enumerate(self.sectors):
+                prices_solved[r][s] = prices_init_mat[r_idx, s_idx] * prices_mult[r_idx, s_idx]
                 
         wages_solved = {}
         for r_idx, r in enumerate(self.regions):
             wages_solved[r] = {
-                'skilled': wages_skilled[r_idx],
-                'unskilled': wages_unskilled[r_idx]
+                'unskilled': wages_base_mat[r_idx, 0] * wages_unskilled_mult[r_idx],
+                'semi-skilled': wages_base_mat[r_idx, 1] * wages_semiskilled_mult[r_idx],
+                'skilled': wages_base_mat[r_idx, 2] * wages_skilled_mult[r_idx]
             }
             
-        # Calculate final realized output based on solved prices
+        # Re-evaluate final gross outputs
+        prices_solved_mat = prices_init_mat * prices_mult
+        rk = prices_solved_mat * 0.15
+        pe = prices_solved_mat[:, 3]
+        pe_bc = pe[:, np.newaxis]
+        
+        sig_KE = self.sigma_KE
+        p_KE = (self.theta_K ** sig_KE * rk**(1-sig_KE) + 
+                self.theta_E ** sig_KE * pe_bc**(1-sig_KE)) ** (1.0/(1.0-sig_KE))
+        
+        wu = wages_base_mat[:, 0] * wages_unskilled_mult
+        wm = wages_base_mat[:, 1] * wages_semiskilled_mult
+        ws = wages_base_mat[:, 2] * wages_skilled_mult
+        sig_L = self.sigma_L
+        w_L = (self.theta_u ** sig_L * wu**(1-sig_L) + 
+               self.theta_m ** sig_L * wm**(1-sig_L) + 
+               self.theta_s ** sig_L * ws**(1-sig_L)) ** (1.0/(1.0-sig_L))
+        
+        sig_VA = self.sigma_VA
+        w_L_bc = w_L[:, np.newaxis]
+        p_VA = (self.theta_L ** sig_VA * w_L_bc**(1-sig_VA) + 
+                self.theta_KE ** sig_VA * p_KE**(1-sig_VA)) ** (1.0/(1.0-sig_VA))
+        
+        cap_factor = (capital_mat ** 0.50) * energy_util_mat
+        y_val = tfp_mat * cap_factor * (prices_solved_mat / np.clip(p_VA, 1e-2, None)) ** 0.50
+        
         realized_output = {}
-        for r in self.regions:
-            for s in self.sectors:
-                k = capital[r][s]
-                a_tfp = tfp[r][s]
-                util = energy_utilization[r][s]
-                p_out = prices_solved[r][s]
+        for r_idx, r in enumerate(self.regions):
+            for s_idx, s in enumerate(self.sectors):
+                realized_output[(r, s)] = max(1e-3, y_val[r_idx, s_idx])
                 
-                # Realized output is bound by physical capacities (determined by capital, labor, energy)
-                y_val = a_tfp * (k ** 0.35) * (util ** 0.15) * (p_out / 1.0) ** 0.50
-                realized_output[(r, s)] = max(1e-3, y_val)
-
         return realized_output, prices_solved, wages_solved

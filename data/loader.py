@@ -15,10 +15,40 @@ SECTORS = [
     'Retail', 'Finance', 'Healthcare', 'PublicAdmin', 'Chemicals', 'Tourism'
 ]
 
+# Geographic coordinates (latitude, longitude) of capital cities for the 27 regions
+COORDINATES = {
+    'Cherkasy': (49.4444, 32.0598),
+    'Chernihiv': (51.4982, 31.2893),
+    'Chernivtsi': (48.2908, 25.9345),
+    'Dnipro': (48.4656, 35.0353),
+    'Donetsk': (48.0159, 37.8028),
+    'Ivano-Frankivsk': (48.9215, 24.7097),
+    'Kharkiv': (49.9935, 36.2304),
+    'Kherson': (46.6354, 32.6169),
+    'Khmelnytskyi': (49.4230, 26.9871),
+    'Kyiv_Oblast': (50.4501, 30.5234), # Sourced around Kyiv city
+    'Kirovohrad': (48.5079, 32.2623),
+    'Luhansk': (48.5740, 39.3078),
+    'Lviv': (49.8397, 24.0297),
+    'Mykolaiv': (46.9750, 31.9946),
+    'Odesa': (46.4825, 30.7233),
+    'Poltava': (49.5883, 34.5514),
+    'Rivne': (50.6199, 26.2516),
+    'Sumy': (50.9077, 34.7981),
+    'Ternopil': (49.5535, 25.5948),
+    'Vinnytsia': (49.2331, 28.4682),
+    'Volyn': (50.7472, 25.3254),
+    'Zakarpattia': (48.6208, 22.2879),
+    'Zaporizhzhia': (47.8388, 35.1396),
+    'Zhytomyr': (50.2547, 28.6587),
+    'Crimea': (44.9521, 34.1024),
+    'Kyiv_City': (50.4501, 30.5234),
+    'Sevastopol': (44.6166, 33.5254)
+}
+
 def load_base_technical_coefficients():
     """
     Returns direct requirements technical coefficients matrix for the 15 sectors.
-    Represents how much input from sector J (key) is needed per unit of output in sector I (nested key).
     """
     return {
         'Agriculture': {
@@ -68,16 +98,41 @@ def load_base_technical_coefficients():
         }
     }
 
+def calculate_geographic_distances():
+    """
+    Computes real road distances (in km) between the 27 oblast centers using 
+    geodesic haversine distance corrected by a road curvature multiplier of 1.3.
+    """
+    n = len(REGIONS)
+    dist = np.zeros((n, n))
+    for i, r1 in enumerate(REGIONS):
+        for j, r2 in enumerate(REGIONS):
+            if i == j:
+                dist[i, j] = 1.0 # home/self distance proxy
+            else:
+                lat1, lon1 = COORDINATES[r1]
+                lat2, lon2 = COORDINATES[r2]
+                
+                # Haversine formula
+                R = 6371.0 # Earth radius in km
+                phi1 = np.radians(lat1)
+                phi2 = np.radians(lat2)
+                dphi = np.radians(lat2 - lat1)
+                dlambda = np.radians(lon2 - lon1)
+                
+                a = np.sin(dphi/2.0)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2.0)**2
+                c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+                dist[i, j] = R * c * 1.3 # 30% curvature adjustment for real road detours
+    return dist
+
 def generate_baseline_data():
     """
     Procedurally synthesizes the baseline state for Ukraine's economy in 2026.
-    Ensures correct sizing, consistency, and realistic distribution.
+    Uses 18 five-year cohorts, real coordinates, and 3 labor types.
     """
-    np.random.seed(42) # Deterministic baseline generation
+    np.random.seed(42)
     
     # 1. Demographic Distribution (Total ~34 million)
-    # Kyiv, Dnipro, Lviv, Kharkiv, Odesa are major population hubs
-    # Frontline/occupied regions (Donetsk, Luhansk, Kherson, Crimea, Sevastopol) are initialized with depleted sizes.
     reg_pop_weights = {
         'Kyiv_City': 2.9, 'Dnipro': 2.8, 'Lviv': 2.5, 'Kharkiv': 2.3, 'Odesa': 2.1,
         'Kyiv_Oblast': 1.8, 'Vinnytsia': 1.5, 'Poltava': 1.3, 'Zaporizhzhia': 1.2,
@@ -88,50 +143,65 @@ def generate_baseline_data():
     }
     
     total_weight = sum(reg_pop_weights.values())
-    scale_factor = 34.0e6 / total_weight # Scale to 34 million total population
+    scale_factor = 34.0e6 / total_weight
     
     initial_pop = {}
     fertility_rates = {}
     mortality_rates = {}
     
+    # Realistic age-specific structure shares (18 cohorts)
+    # Reflects declining birth rate, aging population, and war gender imbalance
+    cohort_shares_male = np.array([
+        0.052, 0.051, 0.050, 0.055, 0.062, 0.068, 0.072, 0.075, 0.072, 
+        0.068, 0.062, 0.058, 0.052, 0.048, 0.040, 0.030, 0.020, 0.015
+    ])
+    cohort_shares_female = np.array([
+        0.048, 0.047, 0.046, 0.050, 0.058, 0.064, 0.068, 0.072, 0.070, 
+        0.068, 0.065, 0.062, 0.058, 0.055, 0.050, 0.042, 0.032, 0.025
+    ])
+    
+    # Normalize shares
+    cohort_shares_male /= np.sum(cohort_shares_male)
+    cohort_shares_female /= np.sum(cohort_shares_female)
+    
     for r in REGIONS:
         weight = reg_pop_weights.get(r, 1.0)
         pop_size = weight * scale_factor
         
-        # Gender split: ~47% Male, ~53% Female (skewed due to migration/war/longevity)
         m_pop = pop_size * 0.47
         f_pop = pop_size * 0.53
         
-        # Cohorts: 0-14, 15-64, 65+
-        # Male age distribution: ~16% children, ~67% working, ~17% elderly
         initial_pop[r] = {
-            'Male': np.array([m_pop * 0.16, m_pop * 0.67, m_pop * 0.17]),
-            'Female': np.array([f_pop * 0.14, f_pop * 0.64, f_pop * 0.22]) # skew towards elderly females
+            'Male': m_pop * cohort_shares_male,
+            'Female': f_pop * cohort_shares_female
         }
         
-        # Fertility: lower in cities, slightly higher in rural western regions
-        # Range: 0.012 to 0.017 births per female in 15-64 cohort per year
+        # Fertility modifier
         if r in ['Kyiv_City', 'Kharkiv', 'Lviv', 'Odesa']:
-            fertility_rates[r] = 0.013
+            fertility_rates[r] = 0.85
         elif r in ['Zakarpattia', 'Volyn', 'Rivne', 'Ivano-Frankivsk']:
-            fertility_rates[r] = 0.018
+            fertility_rates[r] = 1.15
         else:
-            fertility_rates[r] = 0.015
+            fertility_rates[r] = 1.0
             
-        # Mortality rates: cohort-specific death probability per year
+        # Baseline mortality (18 cohorts)
         mortality_rates[r] = {
-            'Male': np.array([0.0012, 0.0085, 0.062]), # Higher working-age male mortality
-            'Female': np.array([0.0009, 0.0035, 0.042])
+            'Male': np.array([
+                0.0015, 0.0003, 0.0004, 0.0012, 0.0018, 0.0022, 0.0028, 0.0035, 
+                0.0045, 0.0060, 0.0090, 0.0140, 0.0220, 0.0350, 0.0550, 0.0900, 0.1400, 0.2200
+            ]),
+            'Female': np.array([
+                0.0012, 0.0002, 0.0003, 0.0005, 0.0007, 0.0009, 0.0012, 0.0016, 
+                0.0022, 0.0032, 0.0050, 0.0080, 0.0130, 0.0220, 0.0380, 0.0650, 0.1100, 0.1800
+            ])
         }
 
-    # Gravity coefficients for internal migration
     migration_gravity = {
         'attraction': 0.8,
         'distance_decay': 1.2
     }
 
-    # 2. Capital Stock & GRP Distribution (Total GDP ~ 8.0 trillion UAH, Capital Stock ~ 22.0 trillion UAH)
-    # GRP weights are aligned with population hubs, but Kyiv City has much higher productivity per capita.
+    # 2. Capital Stock & GRP (Total GDP ~ 8.0 trillion UAH, Capital ~ 22.0 trillion UAH)
     reg_grp_weights = {
         'Kyiv_City': 0.24, 'Dnipro': 0.10, 'Lviv': 0.08, 'Kharkiv': 0.06, 'Odesa': 0.06,
         'Kyiv_Oblast': 0.05, 'Poltava': 0.04, 'Zaporizhzhia': 0.03, 'Vinnytsia': 0.03,
@@ -142,14 +212,12 @@ def generate_baseline_data():
     }
     
     total_grp_weight = sum(reg_grp_weights.values())
-    total_capital = 22.0e12 # 22 trillion UAH total capital stock
+    total_capital = 22.0e12
     
     initial_capital = {}
     initial_tfp = {}
     energy_utilization = {}
     
-    # Sector distributions within GRP (varies by region type)
-    # e.g., Agriculture is high in Poltava/Vinnytsia, IT in Kyiv/Lviv, Metallurgy in Dnipro/Zaporizhzhia
     for r in REGIONS:
         initial_capital[r] = {}
         initial_tfp[r] = {}
@@ -158,10 +226,8 @@ def generate_baseline_data():
         reg_weight = reg_grp_weights.get(r, 0.01) / total_grp_weight
         reg_total_cap = total_capital * reg_weight
         
-        # Determine sector allocation weights for this region
         sector_weights = {s: 1.0 for s in SECTORS}
         
-        # Customize sectoral footprints per region
         if r == 'Kyiv_City':
             sector_weights['IT'] = 5.0
             sector_weights['Finance'] = 4.0
@@ -184,7 +250,7 @@ def generate_baseline_data():
             sector_weights['Tourism'] = 2.5
             sector_weights['Agriculture'] = 0.5
         elif r in ['Odesa', 'Mykolaiv', 'Kherson']:
-            sector_weights['Transport'] = 4.0 # Ports & logistics
+            sector_weights['Transport'] = 4.0
             sector_weights['Agriculture'] = 2.0
             sector_weights['Tourism'] = 2.0
             sector_weights['Metallurgy'] = 0.3
@@ -195,16 +261,14 @@ def generate_baseline_data():
             share = sector_weights[s] / sum_sw
             initial_capital[r][s] = reg_total_cap * share
             
-            # TFP baseline: Kyiv has highest efficiency, frontline/occupied have lowest due to damaged assets
             base_tfp = 1.0
             if r in ['Kyiv_City']:
                 base_tfp = 1.4
             elif r in ['Lviv', 'Dnipro']:
                 base_tfp = 1.1
             elif r in ['Donetsk', 'Luhansk', 'Kherson', 'Crimea', 'Sevastopol']:
-                base_tfp = 0.4 # Heavily damaged/unreformed structures
+                base_tfp = 0.4
                 
-            # Sector adjustments to keep GDP order of magnitude correct
             sector_tfp_mult = {
                 'Agriculture': 0.18, 'ConsumerGoods': 0.14, 'Metallurgy': 0.15, 'Energy': 0.22,
                 'IT': 0.45, 'Machinery': 0.16, 'MilitaryIndustrial': 0.20, 'Construction': 0.12,
@@ -214,24 +278,20 @@ def generate_baseline_data():
             
             initial_tfp[r][s] = base_tfp * sector_tfp_mult[s] * 18000.0
             
-            # Energy grid constraints: 2026 starts with grid challenges
-            # Frontline regions and energy hubs are damaged
             if r in ['Donetsk', 'Luhansk', 'Kharkiv', 'Kherson', 'Zaporizhzhia']:
-                energy_utilization[r][s] = 0.65 # 35% energy deficit limit
+                energy_utilization[r][s] = 0.65
             elif r in ['Kyiv_City', 'Kyiv_Oblast', 'Odesa']:
-                energy_utilization[r][s] = 0.80 # 20% energy deficit limit
+                energy_utilization[r][s] = 0.80
             else:
-                energy_utilization[r][s] = 0.92 # 8% deficit
+                energy_utilization[r][s] = 0.92
 
-    # 3. Baseline prices (normalized around 1.0)
     prices = {r: {s: 1.0 for s in SECTORS} for r in REGIONS}
     
-    # 4. Target Final Demand (Consumer, Government, Export)
-    # Approx 60% of GRP is final demand
+    # 4. Target demand
     target_final_demand = {}
     for r in REGIONS:
         reg_weight = reg_grp_weights.get(r, 0.01) / total_grp_weight
-        reg_total_demand_uah = 5.2e12 * reg_weight # 5.2 trillion UAH total final demand
+        reg_total_demand_uah = 5.2e12 * reg_weight
         
         sector_demand_weights = {
             'Agriculture': 0.08, 'ConsumerGoods': 0.25, 'Metallurgy': 0.05, 'Energy': 0.06,
@@ -252,7 +312,6 @@ def generate_baseline_data():
         'PublicAdmin': 0.04, 'Chemicals': 0.02, 'Tourism': 0.01
     }
     
-    # Normalize budget shares
     sum_bs = sum(budget_shares.values())
     budget_shares = {k: v / sum_bs for k, v in budget_shares.items()}
     
@@ -260,13 +319,11 @@ def generate_baseline_data():
     for r in REGIONS:
         subsistence_demands[r] = {}
         reg_weight = reg_grp_weights.get(r, 0.01) / total_grp_weight
-        reg_pop = initial_pop[r]['Male'].sum() + initial_pop[r]['Female'].sum()
+        reg_pop = sum(initial_pop[r]['Male'] + initial_pop[r]['Female'])
         
-        # Total consumer demand for this region
         reg_cons_uah = 3.0e12 * reg_weight
         
         for s in SECTORS:
-            # Subsistence is 40% of standard budget, divided by population to get per-capita units
             share = budget_shares[s]
             subsistence_demands[r][s] = (0.40 * reg_cons_uah * share) / max(1e-1, reg_pop)
             
@@ -274,8 +331,9 @@ def generate_baseline_data():
     for r in REGIONS:
         mult = 1.5 if r == 'Kyiv_City' else (1.1 if r in ['Lviv', 'Dnipro'] else 0.8)
         wages_by_type[r] = {
-            'skilled': 300000.0 * mult,
-            'unskilled': 120000.0 * mult
+            'unskilled': 120000.0 * mult,
+            'semi-skilled': 210000.0 * mult,
+            'skilled': 300000.0 * mult
         }
 
     return {
@@ -293,5 +351,6 @@ def generate_baseline_data():
         'base_tech_coefficients': load_base_technical_coefficients(),
         'budget_shares': budget_shares,
         'subsistence_demands': subsistence_demands,
-        'wages_by_type': wages_by_type
+        'wages_by_type': wages_by_type,
+        'distances': calculate_geographic_distances()
     }

@@ -8,12 +8,15 @@ from engine.finance import FinanceEngine
 
 class ModelRunner:
     """
-    Main controller for the Hybrid AB-CGE simulator.
-    Coordinates Demographics, Micro-ABM, Macro-CGE, and Finance engines.
+    Main controller for the Hybrid AB-CGE Ukraine Economic Simulator.
+    Coordinates demographic Leslie aging, micro agent-based migration and consumption,
+    macro general equilibrium clearing, and commercial banking/fiscal policy.
     """
-    def __init__(self, base_data):
+    def __init__(self, base_data, num_households=3400000):
         self.regions = base_data['regions']
         self.sectors = base_data['sectors']
+        self.R = len(self.regions)
+        self.S = len(self.sectors)
         self.initial_pop = copy.deepcopy(base_data['initial_pop'])
         
         # Initialize Demographics
@@ -32,7 +35,8 @@ class ModelRunner:
         )
         
         # Initialize ABM Engine & Agents
-        self.abm = ABMEngine(self.regions, self.sectors)
+        self.num_households = num_households
+        self.abm = ABMEngine(self.regions, self.sectors, num_households=self.num_households)
         self.capital = copy.deepcopy(base_data['initial_capital'])
         self.abm.initialize_agents(self.initial_pop, self.capital)
         
@@ -82,20 +86,88 @@ class ModelRunner:
                 mods['war_damage'] = {}
                 mods['export_shock'] = 1.0
                 
-            # 2. Demographic Step
-            demo_results = self.demographics.step(year, mods)
-            self.refugee_pool = demo_results['total_pop'] * 0.15 # Refugee tracking
-            
-            # 3. Energy Grid Constraints Update
+            # Initialize frontline states for all regions (default to 0: Safe)
+            frontline_states = mods.get('frontline_states', {})
             for r in self.regions:
+                if r not in frontline_states:
+                    # In baseline, Donbas / Crimea start high-risk or occupied
+                    if r in ['Donetsk', 'Luhansk', 'Crimea', 'Sevastopol']:
+                        frontline_states[r] = 2 # Occupied
+                    elif r in ['Kharkiv', 'Zaporizhzhia', 'Kherson', 'Mykolaiv']:
+                        frontline_states[r] = 1 # Frontline / High-risk
+                    else:
+                        frontline_states[r] = 0 # Safe
+            mods['frontline_states'] = frontline_states
+            
+            # 2. Demographic Step (Leslie aging, fertility, natural mortality on 3.4M agents)
+            demo_results = self.demographics.step(year, mods, abm=self.abm)
+            self.refugee_pool = demo_results['refugees_remaining']
+            
+            # 3. Frontline Displacement (IDPs flee occupied regions)
+            occupied_indices = [self.regions.index(r) for r in self.regions if frontline_states[r] == 2]
+            safe_indices = [self.regions.index(r) for r in self.regions if frontline_states[r] == 0]
+            if len(safe_indices) == 0:
+                safe_indices = [r_idx for r_idx in range(self.R) if r_idx not in occupied_indices]
+                
+            if len(occupied_indices) > 0:
+                in_occupied = np.isin(self.abm.agent_region, occupied_indices) & (self.abm.agent_health != 2)
+                N_flee = np.sum(in_occupied)
+                if N_flee > 0:
+                    # Displacement: flee to safe regions
+                    self.abm.agent_region[in_occupied] = np.random.choice(safe_indices, size=N_flee)
+
+            # 4. Energy Grid Constraints Update
+            for r_idx, r in enumerate(self.regions):
+                state = frontline_states[r]
                 for s in self.sectors:
                     rec = mods.get('energy_recovery', 0.04)
                     dmg = mods['war_damage'].get(r, {}).get(s, 0.0)
                     curr_util = self.energy_utilization[r][s]
-                    self.energy_utilization[r][s] = np.clip(curr_util + rec - dmg, 0.20, 1.0)
+                    next_util = np.clip(curr_util + rec - dmg, 0.20, 1.0)
+                    
+                    if state == 1:
+                        next_util = min(0.50, next_util) # Capped at 50%
+                    elif state == 2:
+                        next_util = 0.0 # Capped at 0%
+                    self.energy_utilization[r][s] = next_util
 
-            # 4. Micro-ABM Step
-            # Step household agents: logit migration, Stone-Geary consumption, labor supply splits
+            # 5. Apply Human Capital modifier (HCI) to regional TFP
+            # HCI = (1 - 0.2 * disabled_rate) * (1 + 0.15 * skilled_rate)
+            regional_tfp = copy.deepcopy(self.tfp)
+            for r_idx, r in enumerate(self.regions):
+                state = frontline_states[r]
+                
+                # Calculate disability and skill shares
+                r_pop = self.demographics.pop_array[r_idx]
+                total_p = np.sum(r_pop)
+                if total_p > 0:
+                    disabled_p = np.sum(r_pop[:, :, 1])
+                    disabled_rate = disabled_p / total_p
+                else:
+                    disabled_rate = 0.0
+                    
+                # Skilled labor rate from ABM agents in region
+                r_mask = (self.abm.agent_region == r_idx) & (self.abm.agent_health != 2)
+                total_agents = np.sum(r_mask)
+                if total_agents > 0:
+                    skilled_agents = np.sum(r_mask & (self.abm.agent_labor == 2))
+                    skilled_rate = skilled_agents / total_agents
+                else:
+                    skilled_rate = 0.15
+                    
+                hci = (1.0 - 0.20 * disabled_rate) * (1.0 + 0.15 * skilled_rate)
+                
+                # Apply frontline modifier
+                frontline_mult = 1.0
+                if state == 1:
+                    frontline_mult = 0.60 # TFP reduced by 40%
+                elif state == 2:
+                    frontline_mult = 0.00 # Occupied: no production
+                    
+                for s in self.sectors:
+                    regional_tfp[r][s] *= (hci * frontline_mult)
+
+            # 6. Micro-ABM Step (Household consumption and migration decisions)
             labor_supply, aggregate_consumption = self.abm.step(
                 prices=self.prices,
                 wages_by_type=self.wages_by_type,
@@ -106,74 +178,78 @@ class ModelRunner:
                 scenario_modifiers=mods
             )
             
-            # 5. Macro-CGE Market Clearing Step
-            # Solve for equilibrium prices and wages clearing all 459 commodity and labor markets
+            # 7. Macro-CGE Market Clearing Step (Solve 486 clearing equations)
             realized_output, prices_solved, wages_solved = self.cge.solve_equilibrium(
                 capital=self.capital,
                 labor_supply_by_type=labor_supply,
-                tfp=self.tfp,
+                tfp=regional_tfp,
                 prices_init=self.prices,
                 energy_utilization=self.energy_utilization,
                 household_demands=aggregate_consumption
             )
             
-            # Update state with solved equilibrium prices and wages
             self.prices = prices_solved
             self.wages_by_type = wages_solved
 
-            # 6. Aggregate Financial flows
+            # 8. Financial aggregates
             total_wages = 0.0
             total_profits = 0.0
             regional_grp_nominal = {r: 0.0 for r in self.regions}
             regional_grp_real = {r: 0.0 for r in self.regions}
             
-            # Map region index helper
-            node_to_idx = self.cge.node_to_idx
-            
             for r in self.regions:
+                state = frontline_states[r]
+                if state == 2:
+                    # Occupied region has 0 output, wages, GRP
+                    continue
+                    
                 ws = self.wages_by_type[r]['skilled']
+                wm = self.wages_by_type[r]['semi-skilled']
                 wu = self.wages_by_type[r]['unskilled']
                 
-                # Fetch skilled/unskilled labor counts from ABM
                 ls = labor_supply[r]['skilled']
+                lm = labor_supply[r]['semi-skilled']
                 lu = labor_supply[r]['unskilled']
                 
-                lab_cost = (ls * ws) + (lu * wu)
+                lab_cost = (ls * ws) + (lm * wm) + (lu * wu)
                 total_wages += lab_cost
                 
-                # Intermediate demands from CGE
                 r_dest_idx = self.regions.index(r)
                 for s in self.sectors:
                     out_val_nominal = realized_output[(r, s)] * self.prices[r][s]
                     
-                    # Estimate intermediate input cost using solved prices
+                    # Intermediate inputs nominal costs
                     int_cost_nominal = 0.0
                     for sx_idx, sx in enumerate(self.sectors):
                         coeff = self.base_tech.get(s, {}).get(sx, 0.0)
                         if coeff > 0:
                             qty_needed = realized_output[(r, s)] * coeff
-                            for rj in range(len(self.regions)):
+                            for rj in range(self.R):
                                 share = self.cge.trade_shares[rj, r_dest_idx, sx_idx]
                                 p_source = self.prices[self.regions[rj]][sx]
                                 int_cost_nominal += share * qty_needed * p_source
-                    
+                                
                     profit = max(0.0, out_val_nominal - int_cost_nominal)
                     total_profits += profit
                     regional_grp_nominal[r] += out_val_nominal - int_cost_nominal
                     
-                    # Real output and intermediate costs (using base prices = 1.0)
+                    # Real (base-price = 1.0) GRP
                     out_val_real = realized_output[(r, s)] * 1.0
                     int_cost_real = sum(realized_output[(r, s)] * self.base_tech.get(s, {}).get(sx, 0.0) for sx in self.sectors)
                     regional_grp_real[r] += out_val_real - int_cost_real
 
-            # Sum regional GRPs to get National Real & Nominal GDP (UAH)
+            # Sum regional GRPs to national GDP
             real_gdp_uah = sum(regional_grp_real.values())
             nominal_gdp_uah = sum(regional_grp_nominal.values())
             nominal_gdp_usd = nominal_gdp_uah / self.finance.exchange_rate
             
             # Export / Import totals (USD)
-            total_exports_usd = sum(realized_output[(r, s)] * 0.15 for r in self.regions for s in ['Agriculture', 'Metallurgy', 'IT']) / self.finance.exchange_rate
-            total_imports_usd = sum(realized_output[(r, s)] * 0.18 for r in self.regions for s in self.sectors) / self.finance.exchange_rate
+            total_exports_usd = sum(realized_output[(r, s)] * 0.15 for r in self.regions for s in ['Agriculture', 'Metallurgy', 'IT'] if frontline_states[r] != 2) / self.finance.exchange_rate
+            total_imports_usd = sum(realized_output[(r, s)] * 0.18 for r in self.regions for s in self.sectors if frontline_states[r] != 2) / self.finance.exchange_rate
+            
+            # Get aggregate household savings to update bank deposits
+            # Living agents wealth
+            household_wealth_sum = float(np.sum(self.abm.agent_wealth[self.abm.agent_health != 2]))
 
             # Step Macro-Finance engine
             fin_results = self.finance.step(
@@ -184,19 +260,29 @@ class ModelRunner:
                 corporate_profits=total_profits,
                 exports_usd=total_exports_usd,
                 imports_usd=total_imports_usd,
-                scenario_modifiers=mods
+                scenario_modifiers=mods,
+                household_wealth_sum=household_wealth_sum
             )
             
-            # 7. Dynamic Capital Accumulation
-            fdi_uah = mods.get('fdi_usd', 2.0e9) * fin_results['exchange_rate']
-            aid_loans_uah = mods.get('foreign_aid_usd', 20.0e9) * (1.0 - mods.get('foreign_aid_grant_share', 0.50)) * fin_results['exchange_rate']
+            # 9. Dynamic Capital Accumulation with Bank Lending
+            # Total investment capital includes FDI, aid loans, reinvested profits, and bank loans
+            bank_loans_added = fin_results['bank_loans']
+            fdi_uah = mods.get('fdi_usd', 1.5e9) * fin_results['exchange_rate']
+            aid_loans_uah = mods.get('foreign_aid_usd', 22.0e9) * (1.0 - mods.get('foreign_aid_grant_share', 0.50)) * fin_results['exchange_rate']
             reinvested_profits = total_profits * 0.20
-            total_investment = fdi_uah + aid_loans_uah + reinvested_profits
             
-            # Share investment across regional sectors
+            total_investment = fdi_uah + aid_loans_uah + reinvested_profits + bank_loans_added * 0.05 # 5% of loan pool channeled to new fixed capital investments annually
+            
             investment_allocation = {}
             for r in self.regions:
                 investment_allocation[r] = {}
+                state = frontline_states[r]
+                if state == 2:
+                    # Occupied region receives 0 investment
+                    for s in self.sectors:
+                        investment_allocation[r][s] = 0.0
+                    continue
+                    
                 grp_share = regional_grp_real[r] / max(1e-5, real_gdp_uah)
                 for s in self.sectors:
                     sector_share = realized_output[(r, s)] / max(1e-5, sum(realized_output[(r, sx)] for sx in self.sectors))
@@ -209,15 +295,26 @@ class ModelRunner:
                 war_damage=mods['war_damage']
             )
             
+            # Frontline regions state 1 has 15% higher capital depreciation
+            for r in self.regions:
+                state = frontline_states[r]
+                if state == 1:
+                    for s in self.sectors:
+                        self.capital[r][s] = max(1e-3, self.capital[r][s] * (1.0 - 0.15))
+                elif state == 2:
+                    # Occupied capital is frozen/destroyed
+                    for s in self.sectors:
+                        self.capital[r][s] = 1e-3
+            
             # Sync capital back to Firm Agents in the ABM
             for r in self.regions:
                 for s in self.sectors:
                     self.abm.firms[r][s].capital = self.capital[r][s]
             
-            # 8. TFP growth step (TFP accumulates over time based on scenario growth rates)
+            # TFP growth step
             for r in self.regions:
                 for s in self.sectors:
-                    self.tfp[r][s] *= (1.0 + mods.get('tfp_growth', 0.015))
+                    self.tfp[r][s] *= (1.0 + mods.get('tfp_growth', 0.018))
 
             # Store year snapshot
             snapshot = {
@@ -235,12 +332,15 @@ class ModelRunner:
                 'deficit_gdp': fin_results['deficit_gdp'],
                 'trade_balance_usd': fin_results['trade_balance_usd'],
                 'tax_revenue_uah': fin_results['tax_revenue_uah'],
+                'bank_loans': fin_results['bank_loans'],
+                'bank_deposits': fin_results['bank_deposits'],
                 'regional_data': {r: {
                     'grp_real': regional_grp_real[r],
                     'grp_nominal': regional_grp_nominal[r],
-                    'pop': sum(np.sum(self.demographics.pop[r][g]) for g in ['Male', 'Female']),
+                    'pop': sum(self.demographics.pop[r][g].sum() for g in ['Male', 'Female']),
                     'wage_skilled': self.wages_by_type[r]['skilled'],
                     'wage_unskilled': self.wages_by_type[r]['unskilled'],
+                    'frontline_state': int(frontline_states[r]),
                     'sectors': {s: {
                         'output': realized_output[(r, s)],
                         'capital': self.capital[r][s],

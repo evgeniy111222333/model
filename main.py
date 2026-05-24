@@ -36,16 +36,16 @@ def convert_to_json_serializable(obj):
     else:
         return str(obj)
 
-def run_single_scenario(scenario_name, base_data, num_years=25):
-    runner = ModelRunner(base_data)
+def run_single_scenario(scenario_name, base_data, num_years=25, num_households=3400000):
+    runner = ModelRunner(base_data, num_households=num_households)
     scenarios = ScenarioEngine(runner.regions, runner.sectors)
     print(f"\nRunning deterministic simulation for scenario: '{scenario_name.upper()}' (2026-2050)")
-    print("-" * 80)
+    print("-" * 125)
     history = runner.run_simulation(scenario_name, scenarios, num_years=num_years)
     
     # Print yearly console log summary
-    print(f"{'Year':<6} | {'GDP Real (Trln UAH)':<20} | {'GDP Nom (Bln USD)':<18} | {'Pop (Mln)':<10} | {'Skilled Wage':<13} | {'Unskilled Wage':<15} | {'Debt/GDP':<10}")
-    print("-" * 110)
+    print(f"{'Year':<6} | {'GDP Real (Trln UAH)':<20} | {'GDP Nom (Bln USD)':<18} | {'Pop (Mln)':<10} | {'Skilled Wage':<13} | {'Semi-Skilled Wage':<18} | {'Unskilled Wage':<15} | {'Debt/GDP':<10}")
+    print("-" * 125)
     for snap in history:
         y = snap['year']
         gdp_uah = snap['gdp_real_uah'] / 1.0e12
@@ -55,18 +55,19 @@ def run_single_scenario(scenario_name, base_data, num_years=25):
         
         # Calculate average wages across regions
         avg_skilled = sum(r_data['wage_skilled'] for r_data in snap['regional_data'].values()) / len(snap['regional_data'])
+        avg_semiskilled = sum(r_data.get('wage_semi-skilled', (r_data['wage_skilled'] + r_data['wage_unskilled']) / 2.0) for r_data in snap['regional_data'].values()) / len(snap['regional_data'])
         avg_unskilled = sum(r_data['wage_unskilled'] for r_data in snap['regional_data'].values()) / len(snap['regional_data'])
         
-        print(f"{y:<6} | {gdp_uah:<20.3f} | {gdp_usd:<18.2f} | {pop:<10.2f} | {avg_skilled:<13.1f} | {avg_unskilled:<15.1f} | {debt:<9.1f}%")
-    print("-" * 110)
+        print(f"{y:<6} | {gdp_uah:<20.3f} | {gdp_usd:<18.2f} | {pop:<10.2f} | {avg_skilled:<13.1f} | {avg_semiskilled:<18.1f} | {avg_unskilled:<15.1f} | {debt:<9.1f}%")
+    print("-" * 125)
     return history
 
-def run_monte_carlo(scenario_name, base_data, num_trials, num_years=25):
+def run_monte_carlo(scenario_name, base_data, num_trials, num_years=25, num_households=3400000):
     print(f"\nRunning Monte Carlo LHS simulation for scenario: '{scenario_name.upper()}' ({num_trials} trials)")
     print("-" * 80)
     
     # Instantiate models
-    runner_ref = ModelRunner(base_data)
+    runner_ref = ModelRunner(base_data, num_households=num_households)
     scenarios = ScenarioEngine(runner_ref.regions, runner_ref.sectors)
     
     # Generate LHS samples
@@ -83,7 +84,7 @@ def run_monte_carlo(scenario_name, base_data, num_trials, num_years=25):
     t_start = os.times().elapsed
     for trial in range(num_trials):
         # Fresh initialization for each trial
-        runner = ModelRunner(base_data)
+        runner = ModelRunner(base_data, num_households=num_households)
         sample = lhs_samples[trial]
         history = runner.run_simulation(scenario_name, scenarios, num_years=num_years, lhs_sample=sample)
         
@@ -139,6 +140,7 @@ def main():
                         help="Choose simulation scenario ('all' runs all three deterministically)")
     parser.add_argument('--monte-carlo', action='store_true', help="Run Monte Carlo simulation with stochastic shocks")
     parser.add_argument('--trials', type=int, default=50, help="Number of Monte Carlo trials")
+    parser.add_argument('--agents', type=int, default=3400000, help="Number of agents to simulate")
     parser.add_argument('--out', type=str, default='simulation_results.json', help="File path to save JSON results")
     parser.add_argument('--benchmark', action='store_true', help="Run performance benchmarks and scaling reports")
     
@@ -156,14 +158,14 @@ def main():
     if args.monte_carlo:
         # Run Monte Carlo for the chosen scenario (or baseline by default)
         scen = 'baseline' if args.scenario == 'all' else args.scenario
-        results['monte_carlo'] = run_monte_carlo(scen, base_data, args.trials)
+        results['monte_carlo'] = run_monte_carlo(scen, base_data, args.trials, num_households=args.agents)
     else:
         # Run deterministic simulation(s)
         if args.scenario == 'all':
             for s in ['baseline', 'optimistic', 'pessimistic']:
-                results[s] = run_single_scenario(s, base_data)
+                results[s] = run_single_scenario(s, base_data, num_households=args.agents)
         else:
-            results[args.scenario] = run_single_scenario(args.scenario, base_data)
+            results[args.scenario] = run_single_scenario(args.scenario, base_data, num_households=args.agents)
             
     # Save results to JSON
     print(f"\nSerializing and saving results to: {args.out}...")
