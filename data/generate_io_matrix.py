@@ -53,16 +53,20 @@ def generate_io_matrix():
     n = len(SUB_SECTORS)
     matrix = np.zeros((n, n))
     
-    # 1. Fill background with unique log-normal technical noise
-    # This represents small auxiliary transactions (e.g. office supplies, telecom, minor services)
-    # Ensures 100% uniqueness of cells and realistic dense structure
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                matrix[i, j] = np.random.uniform(0.015, 0.035) # self-consumption
-            else:
-                matrix[i, j] = np.random.lognormal(-7.5, 0.5) # small background coefficients
-                
+    # 1. Fill background with sparse unique technical noise
+    # Represents realistic sparsity (most sectors only consume from a subset of other sectors)
+    # Spreads values across a wider range to prevent collision at 6 decimal places
+    for j in range(n):
+        matrix[j, j] = np.random.uniform(0.015000, 0.035000) # self-consumption
+        
+        # Choose a random 25% of other rows to be non-zero background inputs
+        other_indices = [i for i in range(n) if i != j]
+        num_aux = int(n * 0.25)
+        aux_indices = np.random.choice(other_indices, size=num_aux, replace=False)
+        
+        for i in aux_indices:
+            matrix[i, j] = np.random.uniform(0.000800, 0.009000)
+            
     # 2. Inject Group-Level and Sector-Specific Key Production Functions
     for j, col_sector in enumerate(SUB_SECTORS):
         key_inputs = {}
