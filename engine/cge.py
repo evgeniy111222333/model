@@ -189,6 +189,10 @@ class CGESolver:
         self.p_world_import = np.ones(self.S)
         self.p_world_export = np.ones(self.S)
         
+        # Store initial wages base for wage clipping (to prevent drift)
+        self.initial_wages_base = None
+        self.calibrated = False
+        
     def _init_distances(self):
         if self.R == 27:
             try:
@@ -451,7 +455,7 @@ class CGESolver:
         )
         return excess
 
-    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None, wages_by_type=None, eu_integration_progress=0.0, year=2026, quarter=0):
+    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None, wages_by_type=None, eu_integration_progress=0.0, year=2026, quarter=0, frontline_states=None):
         if interest_rate is not None:
             self.interest_rate = interest_rate
         else:
@@ -517,6 +521,19 @@ class CGESolver:
             wages_base_mat[r_idx, 0] = w_u
             wages_base_mat[r_idx, 1] = w_m
             wages_base_mat[r_idx, 2] = w_s
+        
+        # Store INITIAL wages base for clipping (prevents compounding growth)
+        if self.initial_wages_base is None:
+            self.initial_wages_base = wages_base_mat.copy()
+        
+        # Skip occupied regions (state=2) in CGE calculations
+        if frontline_states is not None:
+            for r_idx, r in enumerate(self.regions):
+                if frontline_states.get(r, 0) == 2:
+                    # Set zero labor supply for occupied regions
+                    labor_supply_mat[r_idx, :] = 0.0
+                    # Set minimum wages to prevent noise
+                    wages_base_mat[r_idx, :] = wages_base_mat[r_idx, :] * 0.01
  
         if self.S <= 15:
             # ----------------------------------------------------
@@ -597,15 +614,37 @@ class CGESolver:
                 prices_solved_mat = np.clip(prices_solved_mat, 1e-2, 1e2)
                 
                 # Adjust wages based on labor excess supply/demand
-                wages_solved_mat[:, 2] *= (1.0 + gamma_w * np.clip(excess_skilled / np.clip(labor_supply_mat[:, 2], 1.0, None), -0.2, 0.2))
-                wages_solved_mat[:, 1] *= (1.0 + gamma_w * np.clip(excess_semiskilled / np.clip(labor_supply_mat[:, 1], 1.0, None), -0.2, 0.2))
-                wages_solved_mat[:, 0] *= (1.0 + gamma_w * np.clip(excess_unskilled / np.clip(labor_supply_mat[:, 0], 1.0, None), -0.2, 0.2))
+                # REGIONAL-SPECIFIC multipliers to preserve regional differentiation
+                # Each region adjusts relative to its own wage level, not uniform
+                reg_excess_skilled = excess_skilled / np.clip(labor_supply_mat[:, 2], 1.0, None)
+                reg_excess_semiskilled = excess_semiskilled / np.clip(labor_supply_mat[:, 1], 1.0, None)
+                reg_excess_unskilled = excess_unskilled / np.clip(labor_supply_mat[:, 0], 1.0, None)
+                
+                wages_solved_mat[:, 2] *= (1.0 + gamma_w * np.clip(reg_excess_skilled, -0.2, 0.2))
+                wages_solved_mat[:, 1] *= (1.0 + gamma_w * np.clip(reg_excess_semiskilled, -0.2, 0.2))
+                wages_solved_mat[:, 0] *= (1.0 + gamma_w * np.clip(reg_excess_unskilled, -0.2, 0.2))
                 wages_solved_mat = np.clip(wages_solved_mat, 1e2, 1e7)
-                # CLIP WAGE MULTIPLIERS to prevent divergence
-                # Each multiplier should stay within [0.5, 3.0] to prevent explosive wage changes
-                wages_solved_mat = np.clip(wages_solved_mat, 
-                                           wages_base_mat * 0.5,
-                                           wages_base_mat * 3.0)
+                # CLIP WAGE MULTIPLIERS to initial base to prevent COMPOUNDING drift
+                # Use initial_wages_base (saved at first call) not current wages_base_mat
+                clip_low = self.initial_wages_base * 0.3
+                clip_high = self.initial_wages_base * 5.0
+                wages_solved_mat = np.clip(wages_solved_mat, clip_low, clip_high)
+                # PRESERVE REGIONAL WAGE RATIOS: don't allow uniform convergence
+                # If a region starts with higher wages, it should stay proportionally higher
+                # Adjust the convergence so high-wage regions don't get dragged down
+                for r_idx in range(self.R):
+                    init_ratio_skilled = self.initial_wages_base[r_idx, 2] / np.mean(self.initial_wages_base[:, 2])
+                    init_ratio_semiskilled = self.initial_wages_base[r_idx, 1] / np.mean(self.initial_wages_base[:, 1])
+                    init_ratio_unskilled = self.initial_wages_base[r_idx, 0] / np.mean(self.initial_wages_base[:, 0])
+                    
+                    mean_wages = np.mean(wages_solved_mat, axis=0)
+                    # If region's wage is below its proportional share, boost it
+                    if wages_solved_mat[r_idx, 2] < mean_wages[2] * init_ratio_skilled * 0.9:
+                        wages_solved_mat[r_idx, 2] = mean_wages[2] * init_ratio_skilled
+                    if wages_solved_mat[r_idx, 1] < mean_wages[1] * init_ratio_semiskilled * 0.9:
+                        wages_solved_mat[r_idx, 1] = mean_wages[1] * init_ratio_semiskilled
+                    if wages_solved_mat[r_idx, 0] < mean_wages[0] * init_ratio_unskilled * 0.9:
+                        wages_solved_mat[r_idx, 0] = mean_wages[0] * init_ratio_unskilled
                 
             wu_solved = wages_solved_mat[:, 0]
             wm_solved = wages_solved_mat[:, 1]

@@ -297,8 +297,13 @@ class FinanceEngine:
             theta_er * max(0.0, er_pct_change) -
             0.20 * (self.interest_rate - self.inflation_rate)
         )
-        # Remove hard 1% floor - allow deflation if conditions warrant
-        self.inflation_rate = max(-0.05, self.inflation_rate + d_inflation)
+        # Mean-reversion inflation: pull toward 3% target to prevent endless deflation
+        # This mimics central bank target in long run
+        target_inflation = 0.03
+        mean_reversion = 0.15 * (target_inflation - self.inflation_rate)
+        self.inflation_rate = self.inflation_rate + d_inflation + mean_reversion
+        # Soft floor to prevent extreme deflation
+        self.inflation_rate = np.clip(self.inflation_rate, -0.03, 0.20)
         
         # NBU Taylor policy rule (interest rate response to inflation deviations)
         neutral_rate = 0.05

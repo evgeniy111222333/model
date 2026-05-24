@@ -518,7 +518,22 @@ def generate_baseline_data():
             
     wages_by_type = {}
     for r in REGIONS:
-        mult = 1.5 if r == 'Kyiv_City' else (1.1 if r in ['Lviv', 'Dnipro'] else 0.8)
+        # Regional wage multipliers based on economic development level
+        # Kyiv: 1.5x (capital, finance/IT hub)
+        # Regional centers: 1.1-1.2x (Lviv, Dnipro, Odesa, Kharkiv)
+        # Mid-tier: 0.95x (larger oblast centers)
+        # Rural/peripheral: 0.75-0.85x
+        if r == 'Kyiv_City':
+            mult = 1.5
+        elif r in ['Lviv', 'Dnipro', 'Odesa', 'Kharkiv', 'Kyiv_Oblast']:
+            mult = 1.1
+        elif r in ['Poltava', 'Vinnytsia', 'Cherkasy', 'Zaporizhzhia', 'Mykolaiv']:
+            mult = 0.95
+        elif r in ['Sumy', 'Chernihiv', 'Kirovohrad', 'Khmelnytskyi', 'Zhytomyr']:
+            mult = 0.85
+        else:
+            mult = 0.75  # Rural/peripheral regions
+        
         wages_by_type[r] = {
             'unskilled': 120000.0 * mult,
             'semi-skilled': 210000.0 * mult,
