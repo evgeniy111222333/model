@@ -1,33 +1,5 @@
 import numpy as np
-
-def get_sector_wage_premium(s):
-    # IT sectors
-    if s in ['ITServicesExport', 'ITProductSaaS', 'Cybersecurity', 'Telecom', 'InternetCloud']:
-        return 3.0
-    # Finance sectors
-    elif s in ['BankState', 'BankCommercial', 'BankRetail', 'Insurance', 'NonBankFinance', 'SecuritiesMarket', 'InternationalFinance']:
-        return 1.4
-    # Defense sectors
-    elif s in ['MilSmallArms', 'MilArmoredVehicles', 'MilArtillery', 'MilMissiles', 'MilUAVs', 'MilEW', 'MilNaval', 'MilProtectiveGear']:
-        return 1.5
-    # Energy Nuclear & utilities
-    elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste', 'EnergyTransmission']:
-        return 1.3
-    # Health private/pharma
-    elif s in ['HealthPrivate', 'PharmaGenerics', 'PharmaOriginals', 'PharmaAPI', 'MedicalDevices', 'Biotechnologies']:
-        return 1.2
-    # Agriculture
-    elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
-        return 0.7
-    # Retail / Service / Tourism
-    elif s in ['TradeRetail', 'TradeWholesale', 'HotelsTourism', 'FoodServices', 'Beverages', 'Tobacco']:
-        return 0.8
-    # Public Admin / Education / Public Healthcare
-    elif s in ['PublicAdmin', 'LawEnforcement', 'UtilityServices', 'GasHeatSupply', 'MilitaryDefense', 'GeneralEduVoc', 'HigherEducation', 'HealthPublic']:
-        return 0.9
-    # Metallurgy, Construction, Chemicals, Machinery, Transport, others
-    else:
-        return 1.0
+from engine.utils import get_sector_wage_premium, get_depreciation_rate, AdaptiveExpectations
 
 
 class HouseholdAgent:
@@ -100,21 +72,8 @@ class ABMEngine:
         
         self.wage_premium_vec = np.array([get_sector_wage_premium(s) for s in self.sectors], dtype=np.float32)
         
-        # Sector depreciation vector in ABMEngine
-        self.depreciation_vec = np.zeros(self.S, dtype=np.float32)
-        for s_idx, s in enumerate(self.sectors):
-            if s in ['ITServicesExport', 'ITProductSaaS', 'Telecom', 'InternetCloud', 'Cybersecurity', 'EdTech']:
-                self.depreciation_vec[s_idx] = 0.25
-            elif s in ['ConstResidential', 'ConstCommercial', 'ConstInfrastructure', 'ConstReconstruction', 'RealEstateOps']:
-                self.depreciation_vec[s_idx] = 0.03
-            elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste']:
-                self.depreciation_vec[s_idx] = 0.025
-            elif s in ['HeavyMachinery', 'TransportMachinery', 'AgriMachinery', 'ElectricalEquipment', 'PrecisionInstruments', 'ElectronicsComponents', 'IndustrialRobots'] or s.startswith('Mil'):
-                self.depreciation_vec[s_idx] = 0.10
-            elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
-                self.depreciation_vec[s_idx] = 0.08
-            else:
-                self.depreciation_vec[s_idx] = 0.07
+        # Use shared depreciation vector from utils
+        self.depreciation_vec = np.array([get_depreciation_rate(s) for s in self.sectors], dtype=np.float32)
         
         self.firms = {}
         
@@ -560,8 +519,9 @@ class ABMEngine:
                 firm.capital += fdi_share + aid_share
                 
                 # Combat / frontline direct capital damage
-                if state == 1:
-                    firm.capital = max(1e-3, firm.capital * (1.0 - 0.15))
+                sector_war_dmg = war_damage.get(r, {}).get(s, 0.0)
+                if sector_war_dmg > 0:
+                    firm.capital = max(1e-3, firm.capital * (1.0 - sector_war_dmg))
                     
                 capital_next[r][s] = firm.capital
                 

@@ -55,7 +55,7 @@ def run_single_scenario(scenario_name, base_data, num_years=25, num_households=3
         
         # Calculate average wages across regions
         avg_skilled = sum(r_data['wage_skilled'] for r_data in snap['regional_data'].values()) / len(snap['regional_data'])
-        avg_semiskilled = sum(r_data.get('wage_semi-skilled', (r_data['wage_skilled'] + r_data['wage_unskilled']) / 2.0) for r_data in snap['regional_data'].values()) / len(snap['regional_data'])
+        avg_semiskilled = sum(r_data.get('wage_semi_skilled', (r_data['wage_skilled'] + r_data['wage_unskilled']) / 2.0) for r_data in snap['regional_data'].values()) / len(snap['regional_data'])
         avg_unskilled = sum(r_data['wage_unskilled'] for r_data in snap['regional_data'].values()) / len(snap['regional_data'])
         
         print(f"{y:<6} | {gdp_uah:<20.3f} | {gdp_usd:<18.2f} | {pop:<10.2f} | {avg_skilled:<13.1f} | {avg_semiskilled:<18.1f} | {avg_unskilled:<15.1f} | {debt:<9.1f}%")

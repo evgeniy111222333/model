@@ -146,11 +146,14 @@ class DemographicEngine:
         
         # Scenario war mortality penalty (increases working age male mortality rate)
         war_mortality_mult = scenario_modifiers.get('war_mortality_mult', 1.0)
+        
+        total_brain_drain = 0.0
 
         if abm is not None:
             # ----------------------------------------------------
             # MICRO AGENT-BASED VECTORIZED DEMOGRAPHICS
             # ----------------------------------------------------
+            N = abm.num_households
             active_mask = abm.agent_health != 2  # Not deceased
             
             # 1. Increment Age & Education transitions
@@ -276,6 +279,7 @@ class DemographicEngine:
             brain_drain_draw = np.random.rand(N)
             flee_mask = skilled_active & (brain_drain_draw < brain_drain_rate)
             abm.agent_health[flee_mask] = 3 # Emigrated
+            total_brain_drain = float(np.sum(flee_mask) * 10.0)
             
             # Repatriation: transition from Emigrated (3) back to Active (0) in Ukraine
             emigrated_mask = abm.agent_health == 3
@@ -493,5 +497,6 @@ class DemographicEngine:
             'total_pop': total_pop_sum,
             'births': float(total_births if abm is None else expected_births),
             'deaths': float(total_deaths),
+            'brain_drain': float(total_brain_drain),
             'refugees_remaining': max(0.0, refugee_pool - returned_ref_actual)
         }

@@ -1,34 +1,6 @@
 import numpy as np
 import scipy.optimize as opt
-
-def get_sector_wage_premium(s):
-    # IT sectors
-    if s in ['ITServicesExport', 'ITProductSaaS', 'Cybersecurity', 'Telecom', 'InternetCloud']:
-        return 3.0
-    # Finance sectors
-    elif s in ['BankState', 'BankCommercial', 'BankRetail', 'Insurance', 'NonBankFinance', 'SecuritiesMarket', 'InternationalFinance']:
-        return 1.4
-    # Defense sectors
-    elif s in ['MilSmallArms', 'MilArmoredVehicles', 'MilArtillery', 'MilMissiles', 'MilUAVs', 'MilEW', 'MilNaval', 'MilProtectiveGear']:
-        return 1.5
-    # Energy Nuclear & utilities
-    elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste', 'EnergyTransmission']:
-        return 1.3
-    # Health private/pharma
-    elif s in ['HealthPrivate', 'PharmaGenerics', 'PharmaOriginals', 'PharmaAPI', 'MedicalDevices', 'Biotechnologies']:
-        return 1.2
-    # Agriculture
-    elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
-        return 0.7
-    # Retail / Service / Tourism
-    elif s in ['TradeRetail', 'TradeWholesale', 'HotelsTourism', 'FoodServices', 'Beverages', 'Tobacco']:
-        return 0.8
-    # Public Admin / Education / Public Healthcare
-    elif s in ['PublicAdmin', 'LawEnforcement', 'UtilityServices', 'GasHeatSupply', 'MilitaryDefense', 'GeneralEduVoc', 'HigherEducation', 'HealthPublic']:
-        return 0.9
-    # Metallurgy, Construction, Chemicals, Machinery, Transport, others
-    else:
-        return 1.0
+from engine.utils import get_sector_wage_premium, build_depreciation_vec, compute_home_bias
 
 class CGESolver:
     """
@@ -121,29 +93,10 @@ class CGESolver:
         self.theta_K_vec = self.alpha_vec / np.clip(1.0 - self.beta_vec, 1e-5, None)
         self.theta_E_vec = self.gamma_vec / np.clip(1.0 - self.beta_vec, 1e-5, None)
         
-        # Sector-specific depreciation rates
-        self.depreciation_vec = np.zeros(self.S)
-        for s_idx, s in enumerate(self.sectors):
-            # IT
-            if s in ['ITServicesExport', 'ITProductSaaS', 'Telecom', 'InternetCloud', 'Cybersecurity', 'EdTech']:
-                self.depreciation_vec[s_idx] = 0.25
-            # Buildings / Real Estate
-            elif s in ['ConstResidential', 'ConstCommercial', 'ConstInfrastructure', 'ConstReconstruction', 'RealEstateOps']:
-                self.depreciation_vec[s_idx] = 0.03
-            # Nuclear Energy
-            elif s in ['EnergyNuclearGen', 'EnergyNuclearFuel', 'EnergyNuclearWaste']:
-                self.depreciation_vec[s_idx] = 0.025
-            # Machinery & Military-Industrial
-            elif s in ['HeavyMachinery', 'TransportMachinery', 'AgriMachinery', 'ElectricalEquipment', 'PrecisionInstruments', 'ElectronicsComponents', 'IndustrialRobots'] or s.startswith('Mil'):
-                self.depreciation_vec[s_idx] = 0.10
-            # Agriculture
-            elif s in ['AgriGrain', 'AgriTechnical', 'AgriLivestock', 'Fishery', 'Forestry']:
-                self.depreciation_vec[s_idx] = 0.08
-            # Others
-            else:
-                self.depreciation_vec[s_idx] = 0.07
-                
         self.wage_premium_vec = np.array([get_sector_wage_premium(s) for s in self.sectors], dtype=np.float64)
+        
+        # Use shared depreciation vector from utils
+        self.depreciation_vec = build_depreciation_vec(self.sectors)
         
         self.calibrated = False
         self.trade_shares = None
@@ -252,13 +205,17 @@ class CGESolver:
                 else:
                     self.distances[i, j] = 100.0 + abs(i - j) * 35.0
 
-    def calibrate_parameters(self, capital, labor_supply, tfp, target_demand):
+    def calibrate_parameters(self, capital, labor_supply, tfp, target_demand, eu_integration_progress=0.0, year=2026):
         """
         Calibrates trade shares using gravity formulation.
+        home_bias is now dynamic based on EU integration progress.
         """
         if self.distances is None:
             self._init_distances()
-            
+        
+        # Dynamic home bias from utils (decreases with EU integration)
+        home_bias = compute_home_bias(year, eu_integration_progress)
+        
         self.trade_shares = np.zeros((self.R, self.R, self.S))
         
         for s_idx, s in enumerate(self.sectors):
@@ -268,8 +225,9 @@ class CGESolver:
                     dist = self.distances[r_src_idx, r_dest_idx]
                     cap_src = sum(capital[self.regions[r_src_idx]].values())
                     weights[r_src_idx] = cap_src / (dist ** 1.3)
-                    
-                weights[r_dest_idx] *= 5.0 # high home bias
+                
+                # Dynamic home bias (decreases with EU integration)
+                weights[r_dest_idx] *= home_bias
                 
                 sum_w = np.sum(weights)
                 if sum_w > 0:
@@ -279,7 +237,7 @@ class CGESolver:
                     weights[r_dest_idx] = 1.0
                     
                 self.trade_shares[:, r_dest_idx, s_idx] = weights
-                
+        
         self.calibrated = True
 
     def evaluate_cge_algebra(self, prices, w_unskilled, w_semiskilled, w_skilled, capital_mat, labor_supply_mat, tfp_mat, energy_util_mat, hh_demands_mat, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None):
@@ -292,21 +250,29 @@ class CGESolver:
         """
         Evaluates core non-linear CGE equations: value added nesting, factor demands, trade flow clearance.
         """
+        # Define effective wages by sector using regional base wages and sector-specific wage premium
+        wu_eff = w_unskilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
+        wm_eff = w_semiskilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
+        ws_eff = w_skilled[:, np.newaxis] * self.wage_premium_vec[np.newaxis, :]
+
         # 1. Labor cost index: w_L (R, S) using stable CES formulation
-        # For sigma_L = 1.25 (>1), use log-space to avoid numerical instability
+        # For sigma_L = 1.25 (>1), use nested CES to avoid numerical instability
         sig_L = self.sigma_L
         
         if sig_L > 1.0:
-            # Use nested CES: first combine semi and unskilled, then skilled
-            # w_L = (theta_s * ws^rho + (theta_u*wu^rho + theta_m*wm^rho)^(rho/sigma_L))^(1/rho)
-            # where rho = (sigma_L - 1) / sigma_L is negative for sigma_L > 1
+            # Nested CES: first combine semi and unskilled, then skilled
+            # Normalize inner weights: theta_u_norm = theta_u / (theta_u + theta_m)
+            inner_sum = self.theta_u + self.theta_m
+            theta_u_norm = self.theta_u / inner_sum
+            theta_m_norm = self.theta_m / inner_sum
+            
             rho = (sig_L - 1.0) / sig_L  # negative when sig_L > 1
             wu_p = wu_eff ** rho
             wm_p = wm_eff ** rho
             ws_p = ws_eff ** rho
             
-            # First combine unskilled and semi-skilled
-            w_um = (self.theta_u * wu_p + self.theta_m * wm_p) ** (1.0 / rho)
+            # First combine normalized unskilled and semi-skilled
+            w_um = (theta_u_norm * wu_p + theta_m_norm * wm_p) ** (1.0 / rho)
             # Then combine with skilled using outer weights
             w_L_raw = (self.theta_s * ws_p + (1.0 - self.theta_s) * w_um ** rho) ** (1.0 / rho)
         else:
@@ -352,9 +318,18 @@ class CGESolver:
         # 5. Factor Demands
         L_composite = y_val * (p_VA / np.clip(w_L, 1e-2, None)) ** sig_VA * self.theta_L_vec[np.newaxis, :]
         
-        L_u = L_composite * (w_L / np.clip(wu_eff, 1e-2, None)) ** sig_L * self.theta_u
-        L_m = L_composite * (w_L / np.clip(wm_eff, 1e-2, None)) ** sig_L * self.theta_m
-        L_s = L_composite * (w_L / np.clip(ws_eff, 1e-2, None)) ** sig_L * self.theta_s
+        if sig_L > 1.0:
+            inner_sum = self.theta_u + self.theta_m
+            theta_u_norm = self.theta_u / inner_sum
+            theta_m_norm = self.theta_m / inner_sum
+            
+            L_u = L_composite * (w_L / np.clip(wu_eff, 1e-2, None)) ** sig_L * (1.0 - self.theta_s) * theta_u_norm
+            L_m = L_composite * (w_L / np.clip(wm_eff, 1e-2, None)) ** sig_L * (1.0 - self.theta_s) * theta_m_norm
+            L_s = L_composite * (w_L / np.clip(ws_eff, 1e-2, None)) ** sig_L * self.theta_s
+        else:
+            L_u = L_composite * (w_L / np.clip(wu_eff, 1e-2, None)) ** sig_L * self.theta_u
+            L_m = L_composite * (w_L / np.clip(wm_eff, 1e-2, None)) ** sig_L * self.theta_m
+            L_s = L_composite * (w_L / np.clip(ws_eff, 1e-2, None)) ** sig_L * self.theta_s
         
         dem_unskilled = np.sum(L_u, axis=1)
         dem_semiskilled = np.sum(L_m, axis=1)
@@ -476,7 +451,7 @@ class CGESolver:
         )
         return excess
 
-    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None):
+    def solve_equilibrium(self, capital, labor_supply_by_type, tfp, prices_init, energy_utilization, household_demands, exchange_rate=40.0, interest_rate=None, p_world_import=None, p_world_export=None, wages_by_type=None, eu_integration_progress=0.0, year=2026):
         if interest_rate is not None:
             self.interest_rate = interest_rate
         else:
@@ -497,7 +472,8 @@ class CGESolver:
         Uses Powell hybrid method for small systems and fast tatonnement iterations for large systems.
         """
         if not self.calibrated:
-            self.calibrate_parameters(capital, labor_supply_by_type, tfp, household_demands)
+            self.calibrate_parameters(capital, labor_supply_by_type, tfp, household_demands,
+                                      eu_integration_progress=eu_integration_progress, year=year)
             
         capital_mat = np.zeros((self.R, self.S))
         tfp_mat = np.zeros((self.R, self.S))
@@ -521,16 +497,21 @@ class CGESolver:
             labor_supply_mat[r_idx, 1] = labor_supply_by_type[r].get('semi-skilled', labor_supply_by_type[r]['unskilled'] * 0.70)
             labor_supply_mat[r_idx, 2] = labor_supply_by_type[r]['skilled']
             
-            # Get wages from scenario modifiers or use defaults from wages_by_type
-            # labor_supply_by_type contains keys 'unskilled', 'semi-skilled', 'skilled' (counts)
-            # We need actual wages - these should be passed or extracted from the model
-            # For now, use the wages_base_mat passed from the model runner's wages_by_type
-            # Note: this function receives wages_base_mat as parameter, so this block is for fallback
-            w_u = wages_base_mat[r_idx, 0] if r_idx < wages_base_mat.shape[0] else 120000.0
-            w_s = wages_base_mat[r_idx, 2] if r_idx < wages_base_mat.shape[0] else 300000.0
+            # Get actual wages from wages_by_type parameter (passed from model runner)
+            # This ensures CGE solver uses real evolved wages, not hardcoded defaults
+            if wages_by_type is not None and r in wages_by_type:
+                w_u = wages_by_type[r].get('unskilled', 120000.0)
+                w_s = wages_by_type[r].get('skilled', 300000.0)
+                w_m = wages_by_type[r].get('semi-skilled', (w_u + w_s) / 2.0)
+            else:
+                # Fallback to hardcoded defaults only if wages_by_type not provided
+                w_u = 120000.0
+                w_s = 300000.0
+                w_m = 210000.0
+            
             wages_base_mat[r_idx, 0] = w_u
+            wages_base_mat[r_idx, 1] = w_m
             wages_base_mat[r_idx, 2] = w_s
-            wages_base_mat[r_idx, 1] = (w_u + w_s) / 2.0
  
         if self.S <= 15:
             # ----------------------------------------------------

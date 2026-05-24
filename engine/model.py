@@ -5,6 +5,11 @@ from engine.production import ProductionEngine
 from engine.abm import ABMEngine
 from engine.cge import CGESolver
 from engine.finance import FinanceEngine
+from engine.utils import (
+    get_energy_zone, REGION_TO_ZONE, ENERGY_ZONES,
+    compute_shadow_economy_rate, compute_corruption_index,
+    compute_home_bias, HousingMarket, AdaptiveExpectations
+)
 
 class ModelRunner:
     """
@@ -70,6 +75,16 @@ class ModelRunner:
         self.wages_by_type = copy.deepcopy(base_data['wages_by_type'])
         
         self.refugee_pool = 5.0e6
+        
+        # Initialize housing market model
+        self.housing_market = HousingMarket(self.regions)
+        
+        # Initialize adaptive expectations for agents
+        self.expectations = AdaptiveExpectations()
+        
+        # Track previous year wages and GRP for growth calculation
+        self.prev_wages_by_type = copy.deepcopy(self.wages_by_type)
+        self.prev_regional_grp_real = {}
 
     def _update_frontline_states(self, scenario_name, year):
         """
@@ -232,7 +247,7 @@ class ModelRunner:
                         # Energy and heavy industry more vulnerable
                         sector_mult = 2.0 if s.startswith('Energy') or s.startswith('Steel') or s.startswith('Metal') else 1.0
                         mods['war_damage'][r] = mods['war_damage'].get(r, {})
-                        mods['war_damage'][r][s] = dmg_rate * sector_mult
+                        mods['war_damage'][r][s] = min(0.25, dmg_rate * sector_mult)
                 mods['export_shock'] = 1.0
                 
             self._update_frontline_states(scenario_name, year)
@@ -253,10 +268,11 @@ class ModelRunner:
                     self.abm.agent_region[in_occupied] = np.random.choice(safe_indices, size=np.sum(in_occupied))
 
             # 4. Energy Grid Constraints (annual + cascading topological failure)
-            # Energy zone definitions: West=0-5, Center=6-15, East/South=16-26
+            # Energy zone definitions: West/Center/East by GEOGRAPHIC location, not alphabetical
             energy_zone_damage = {'West': 0.0, 'Center': 0.0, 'East': 0.0}
             for r_idx, r in enumerate(self.regions):
                 state = self.frontline_states[r]
+                zone = get_energy_zone(r)  # Use geographic zone lookup
                 for s in self.sectors:
                     rec = mods.get('energy_recovery', 0.04)
                     dmg = mods['war_damage'].get(r, {}).get(s, 0.0)
@@ -272,11 +288,14 @@ class ModelRunner:
                 elif r_idx >= 6:
                     energy_zone_damage['Center'] += sum(mods['war_damage'].get(r, {}).values())
             
-            # Cascading failure: heavy East damage spills into Center
+            # Energy zone tracking for cascade reporting
             zone_cascade = energy_zone_damage['East'] > 0.5
+            
+            # Cascading failure: heavy East damage spills into Center
             if zone_cascade:
-                for r_idx, r in enumerate(self.regions):
-                    if 6 <= r_idx <= 15:
+                for r in self.regions:
+                    zone = get_energy_zone(r)
+                    if zone == 'Center':
                         for s in self.sectors:
                             self.energy_utilization[r][s] = max(0.20, self.energy_utilization[r][s] * 0.85)
             
@@ -311,9 +330,10 @@ class ModelRunner:
             mods['p_world_export'] = p_world_export
 
             # Government sector demand allocation (reconstruction + military)
+            # Use DYNAMIC corruption rate from utils (scenario/EU dependent)
+            corruption_leakage = compute_corruption_index(year, scenario_name, eu_progress)
             defense_nominal = mods.get('defense_spending_ratio', 0.25) * sum(self.capital[r].get(s, 0) for r in self.regions for s in self.sectors) * 0.01
             recon_nominal = mods.get('reconstruction_needs_usd', 15.0e9) * self.finance.exchange_rate * mods.get('foreign_aid_grant_share', 0.50) * 0.30
-            corruption_leakage = 0.15
             recon_effective = recon_nominal * (1.0 - corruption_leakage)
             
             mil_demand_shares = {
@@ -370,7 +390,7 @@ class ModelRunner:
                         if rds in self.sectors:
                             q_consumption[r][rds] = q_consumption[r].get(rds, 0.0) + (recon_effective * rds_share * recon_mult / (self.R * 4.0))
                 
-                # CGE quarterly clearing
+                # CGE quarterly clearing with dynamic home bias
                 q_output, q_prices_solved, q_wages_solved = self.cge.solve_equilibrium(
                     capital=self.capital,
                     labor_supply_by_type=q_labor,
@@ -381,7 +401,10 @@ class ModelRunner:
                     exchange_rate=self.finance.exchange_rate,
                     interest_rate=self.finance.interest_rate,
                     p_world_import=q_mods.get('p_world_import', None),
-                    p_world_export=p_world_export
+                    p_world_export=p_world_export,
+                    wages_by_type=self.wages_by_type,
+                    eu_integration_progress=eu_progress,
+                    year=year
                 )
                 
                 # Calvo sticky prices: blend solved equilibrium with previous prices
@@ -479,11 +502,11 @@ class ModelRunner:
             for r in self.regions:
                 if self.frontline_states[r] == 2:
                     continue
-                for s in self.sectors:
+                for s_idx, s in enumerate(self.sectors):
                     cap = self.capital[r].get(s, 0.0)
                     interest_rate = self.finance.interest_rate
-                    depreciation = 0.07  # average depreciation rate
-                    total_capital_cost += cap * (interest_rate + depreciation)
+                    dep = self.cge.depreciation_vec[s_idx]
+                    total_capital_cost += cap * (interest_rate + dep)
             
             # Profits as residual of GRP after factor payments
             total_profits = max(0.0, nominal_gdp_uah - total_wages - total_capital_cost)
@@ -499,9 +522,8 @@ class ModelRunner:
             else:
                 num_pensioners = float(np.sum(self.demographics.pop_array[:, 13:, :, :]) + np.sum(self.demographics.pop_array[:, :13, :, 1]))
             
-            # Shadow economy: 30% of wages/profits are informal and avoid tax
-            # FinanceEngine sees only 70% of taxable wages/profits
-            shadow_economy_rate = mods.get('shadow_economy_rate', 0.30)
+            # Shadow economy: DYNAMIC rate from utils (scenario/EU integration dependent)
+            shadow_economy_rate = compute_shadow_economy_rate(year, scenario_name, eu_progress)
             taxable_wages = total_wages * (1.0 - shadow_economy_rate)
             taxable_profits = total_profits * (1.0 - shadow_economy_rate)
             
@@ -532,12 +554,67 @@ class ModelRunner:
                 scenario_modifiers=mods
             )
             
-            # TFP growth step
+            # TFP growth step (now quarterly: apply 1/4 of annual rate per quarter)
+            # Note: TFP already updated quarterly in the 4-quarter sub-loop via regional_tfp
+            # This annual step handles structural TFP growth (knowledge spillovers, innovation)
             tfp_growth_by_region = mods.get('tfp_growth_by_region', {})
             for r in self.regions:
                 growth_rate = tfp_growth_by_region.get(r, mods.get('tfp_growth', 0.018))
                 for s in self.sectors:
                     self.tfp[r][s] *= (1.0 + growth_rate)
+            
+            # Update adaptive expectations with actual outcomes
+            actual_inflation = fin_results.get('inflation_rate', 0.0)
+            actual_wage_growth = 0.0
+            prev_skilled_sum = sum(self.prev_wages_by_type[r]['skilled'] for r in self.regions[:5])
+            curr_skilled_sum = sum(self.wages_by_type[r]['skilled'] for r in self.regions[:5])
+            if prev_skilled_sum > 0:
+                actual_wage_growth = (curr_skilled_sum / prev_skilled_sum) - 1.0
+            actual_grp_growth = {}
+            for r in self.regions:
+                prev_r = self.prev_regional_grp_real.get(r, 1.0)
+                if prev_r > 0:
+                    actual_grp_growth[r] = (regional_grp_real[r] / prev_r) - 1.0
+                else:
+                    actual_grp_growth[r] = 0.0
+            
+            self.expectations.update(
+                actual_inflation=actual_inflation,
+                actual_wage_growth=actual_wage_growth,
+                actual_grp_growth_by_region=actual_grp_growth
+            )
+            
+            # Housing market step
+            pop_by_region = {r: sum(self.demographics.pop[r][g].sum() for g in ['Male', 'Female']) for r in self.regions}
+            grp_per_capita_dict = {r: grp_per_capita.get(r, 1.0) for r in self.regions}
+            
+            housing_wealth_effect = self.housing_market.step(
+                population=pop_by_region,
+                income_per_capita=grp_per_capita_dict,
+                war_damage_by_region=mods.get('war_damage', {}),
+                frontline_states=self.frontline_states,
+                expected_inflation=self.expectations.get_expected_inflation()
+            )
+            
+            # Store state for next year
+            self.prev_regional_grp_real = regional_grp_real.copy()
+            self.prev_wages_by_type = copy.deepcopy(self.wages_by_type)
+            
+            # Compute unemployment rates by region for reporting
+            unemployment_rates = {}
+            for r in self.regions:
+                labor_supply_r = annual_labor_supply[r]
+                total_supply = sum(labor_supply_r.values())
+                # Estimate labor demand from wages and prices
+                wage_sum = (labor_supply_r.get('skilled', 0) * self.wages_by_type[r]['skilled'] +
+                            labor_supply_r.get('semi-skilled', 0) * self.wages_by_type[r].get('semi-skilled', 0) +
+                            labor_supply_r.get('unskilled', 0) * self.wages_by_type[r]['unskilled'])
+                labor_demand_r = wage_sum / max(1.0, self.wages_by_type[r]['unskilled'])
+                
+                if total_supply > 0:
+                    unemployment_rates[r] = max(0.0, min(0.35, 1.0 - (labor_demand_r / total_supply) * 0.9))
+                else:
+                    unemployment_rates[r] = 0.0
             
             snapshot = {
                 'year': year,
@@ -546,6 +623,7 @@ class ModelRunner:
                 'population': demo_results['total_pop'],
                 'births': demo_results['births'],
                 'deaths': demo_results['deaths'],
+                'brain_drain': demo_results.get('brain_drain', 0.0),
                 'refugees_remaining': demo_results['refugees_remaining'],
                 'inflation': fin_results['inflation_rate'],
                 'exchange_rate': fin_results['exchange_rate'],
@@ -562,9 +640,12 @@ class ModelRunner:
                 'insurance_equity': fin_results.get('insurance_equity', 0.0),
                 'insurance_reserves': fin_results.get('insurance_reserves', 0.0),
                 'shadow_economy_gdp_share': shadow_economy_rate,
+                'corruption_leakage': corruption_leakage,
+                'home_bias': compute_home_bias(year, eu_progress),
                 'energy_zone_cascade': zone_cascade,
                 'eu_integration_progress': eu_progress,
                 'cbam_penalty': cbam_penalty,
+                'unemployment_rate': sum(unemployment_rates.values()) / len(unemployment_rates) if unemployment_rates else 0.0,
                 'regional_data': {r: {
                     'grp_real': regional_grp_real[r],
                     'grp_nominal': regional_grp_nominal[r],
@@ -573,7 +654,10 @@ class ModelRunner:
                     'wage_unskilled': self.wages_by_type[r]['unskilled'],
                     'wage_semi_skilled': self.wages_by_type[r].get('semi-skilled', (self.wages_by_type[r]['skilled'] + self.wages_by_type[r]['unskilled']) / 2.0),
                     'frontline_state': int(self.frontline_states[r]),
+                    'unemployment_rate': unemployment_rates.get(r, 0.0),
                     'tfp_average': float(sum(self.tfp[r].values()) / len(self.tfp[r])),
+                    'housing_wealth': self.housing_market.get_housing_wealth(r),
+                    'energy_zone': get_energy_zone(r),
                     'sectors': {s: {
                         'output': realized_output[(r, s)],
                         'capital': self.capital[r][s],
